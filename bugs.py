@@ -127,11 +127,11 @@ WEST  = (-1, 0)
 
 RELATIVE_DIRECTIONS = [
     "forward",
-    "forward_left" 
+    "forward_left", 
     "left",
-    "back_left"
+    "back_left",
     "back",
-    "back_right"
+    "back_right",
     "right", 
     "forward_right"
 ]
@@ -621,6 +621,48 @@ class NeuralBug(BaseBug):
         return mutated_brain
 
 
+class Simulation:
+    def __init__(self, world, bug, max_iterations=MAX_ITERATIONS, life_force=LIFE_FORCE):
+        self.world = world
+        self.bug = bug
+        self.max_iterations = max_iterations
+        self.life_force = life_force
+        
+    def run(self):
+        """Runs the bug through the world until it starves or hits the iteration limit."""
+        until_we_die = self.life_force
+        turns_survived = 0
+        
+        for turn in range(self.max_iterations):
+            until_we_die -= 1
+            turns_survived += 1
+            
+            # 1. Look
+            perception = self.world.get_perception(**self.bug.vision_cone)
+            
+            # 2. Think
+            next_action = self.bug.request_action(perception=perception)
+            
+            # 3. Act
+            move_result = self.world.move_relative(next_action)
+            
+            # 4. React
+            if move_result == "food":
+                until_we_die = self.life_force
+        
+            # 5. Check Survival
+            if until_we_die <= 0:
+                break 
+                
+        # Return standard metrics so the trainer knows what happened
+        food_collected = getattr(self.world, 'food_collected', 0)
+        
+        return {
+            "turns_survived": turns_survived,
+            "food_collected": food_collected,
+            "starved": until_we_die <= 0
+        }
+
 #
 # Fitness Functions
 #
@@ -821,7 +863,7 @@ def train_neural_algorithm(generations=GENERATIONS, population_size=POP_SIZE, mu
     
     training_cone = VISION_CONES["Radar"]
     
-    # FIX 1: Initialize with NeuralBug instead of BrainBug
+    # Initialize with NeuralBug
     population = [NeuralBug(vision_cone=training_cone) for _ in range(population_size)]
     
     # Track the best score across ALL generations to log breakthroughs
@@ -885,7 +927,12 @@ def train_neural_algorithm(generations=GENERATIONS, population_size=POP_SIZE, mu
     return best_bug
 
 
-def train_neural_algorithm_with_trials(generations=GENERATIONS, population_size=POP_SIZE, mutation_rate=MUTATION_RATE, trials=3):
+def train_neural_algorithm_with_trials(
+        generations=GENERATIONS, 
+        population_size=POP_SIZE, 
+        mutation_rate=MUTATION_RATE, 
+        trials=3
+        ):
     Log.info("--- STARTING MULTI-TRIAL NEURAL EVOLUTION ---")
     Log.info(f"Generations: {generations} | Population: {population_size} | Trials per Bug: {trials} | Mutation Rate: {mutation_rate}\n")
     
@@ -904,28 +951,17 @@ def train_neural_algorithm_with_trials(generations=GENERATIONS, population_size=
         for bug in population:
             total_score_across_trials = 0
             
-            # --- THE MULTI-TRIAL LOOP ---
             for _ in range(trials):
-                # Generate a fresh map for this specific trial
-                starting_food = generate_initial_food()
-                world = World(initial_food=starting_food)
-                until_we_die = LIFE_FORCE
+                # Setup the board and the rules
+                world = World(initial_food=generate_initial_food())
+                sim = Simulation(world, bug)
                 
-                for turn in range(MAX_ITERATIONS):
-                    until_we_die -= 1
-                    
-                    perception = world.get_perception(**bug.vision_cone)
-                    next_action = bug.request_action(perception=perception)
-                    move_result = world.move_relative(next_action)
-                    
-                    if move_result == "food":
-                        until_we_die = LIFE_FORCE
+                # Run it
+                results = sim.run()
                 
-                    if until_we_die <= 0:
-                        break 
-                        
-                # Add this trial's score to the running total
-                total_score_across_trials += getattr(world, 'food_collected', 0)
+                # Evaluate it
+                trial_score = fitness_gluttony(world, results["food_collected"])
+                total_fitness_across_trials += trial_score
                 
             # Fitness is the exact AVERAGE performance across all map layouts
             bug.fitness = total_score_across_trials / trials
@@ -992,27 +1028,15 @@ def train_neural_algorithm_with_trials_and_fitness(
             total_fitness_across_trials = 0
             
             for _ in range(trials):
-                starting_food = generate_initial_food()
-                world = World(initial_food=starting_food)
-                until_we_die = LIFE_FORCE
-                turns_survived = 0
+                # Setup the board and the rules
+                world = World(initial_food=generate_initial_food())
+                sim = Simulation(world, bug)
                 
-                for turn in range(MAX_ITERATIONS):
-                    until_we_die -= 1
-                    turns_survived += 1
-                    
-                    perception = world.get_perception(**bug.vision_cone)
-                    next_action = bug.request_action(perception=perception)
-                    move_result = world.move_relative(next_action)
-                    
-                    if move_result == "food":
-                        until_we_die = LIFE_FORCE
+                # Run it
+                results = sim.run()
                 
-                    if until_we_die <= 0:
-                        break 
-                        
-                # --- NEW: Call the injected fitness function ---
-                trial_score = fitness_fn(world, turns_survived)
+                # Evaluate it
+                trial_score = fitness_fn(world, results["turns_survived"])
                 total_fitness_across_trials += trial_score
                 
             bug.fitness = total_fitness_across_trials / trials
@@ -1058,7 +1082,7 @@ if __name__ == "__main__":
     #
     # Basic Bugs tests the Rules based bugs
     #
-    # basic_bugs()
+    basic_bugs()
 
     #
     # Genetic Algorithm is simple weights and outputs.
@@ -1083,19 +1107,5 @@ if __name__ == "__main__":
     # Bug through generations of testing, driving by args or CONSTS above
     #
     train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_gluttony)
-    #
-    # 2026-06-03 13:49:27 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 1620.0)
-    # Gen 047 | Top Score: 904.3   | Avg Score: 148.05
-    # Gen 048 | Top Score: 1040.0  | Avg Score: 155.76
-    # Gen 049 | Top Score: 814.0   | Avg Score: 148.25
-    # Gen 050 | Top Score: 961.0   | Avg Score: 158.42
-    # 2026-06-03 13:53:04 [info     ] 
-    #
     train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_longevity)
-    #
-    # 2026-06-03 14:08:54 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 17910.0)
-    # Gen 037 | Top Score: 10512.7 | Avg Score: 1474.62
-    # Gen 038 | Top Score: 16718.3 | Avg Score: 1522.48
-    # Gen 039 | Top Score: 12747.0 | Avg Score: 1757.20
-    #
     train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_efficiency)

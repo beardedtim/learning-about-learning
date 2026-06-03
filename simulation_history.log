@@ -1,0 +1,34 @@
+2026-06-03 14:32:25 [info     ] --- STARTING NEURAL EVOLUTION (FITNESS_GLUTTONY) ---
+2026-06-03 14:32:25 [info     ] Generations: 50 | Population: 1000 | Trials: 3
+
+2026-06-03 14:32:27 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 8.3)
+2026-06-03 14:32:30 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 9.7)
+2026-06-03 14:32:32 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 38.3)
+2026-06-03 14:32:49 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 57.3)
+2026-06-03 14:33:05 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 81.3)
+2026-06-03 14:33:15 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 84.3)
+2026-06-03 14:33:36 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 87.7)
+2026-06-03 14:33:58 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 98.3)
+2026-06-03 14:34:09 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 144.7)
+2026-06-03 14:34:47 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 190.3)
+2026-06-03 14:35:01 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 198.0)
+2026-06-03 14:35:32 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 310.3)
+2026-06-03 14:37:23 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 397.3)
+2026-06-03 14:38:33 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 420.0)
+2026-06-03 14:39:01 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 490.7)
+2026-06-03 14:39:32 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 571.3)
+2026-06-03 14:40:41 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 734.0)
+2026-06-03 14:42:43 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 1133.3)
+2026-06-03 14:48:48 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 1934.7)
+2026-06-03 14:51:51 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 2081.0)
+2026-06-03 14:56:28 [info     ] 
+--- NEURAL EVOLUTION COMPLETE ---
+2026-06-03 14:56:28 [info     ] Final Bug reached a top average score of 1162.3
+2026-06-03 14:56:28 [info     ] --- STARTING NEURAL EVOLUTION (FITNESS_LONGEVITY) ---
+2026-06-03 14:56:28 [info     ] Generations: 50 | Population: 1000 | Trials: 3
+
+2026-06-03 14:56:30 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 141.0)
+2026-06-03 14:56:32 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 254.0)
+2026-06-03 14:56:36 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 540.0)
+2026-06-03 14:56:41 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 552.0)
+2026-06-03 14:56:56 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 585.7)
