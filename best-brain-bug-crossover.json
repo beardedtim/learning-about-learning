@@ -1,0 +1,18 @@
+{
+    "bug_type": "BrainBug",
+    "vision_cone": {
+        "forward": 5,
+        "left": 2,
+        "back": 1,
+        "right": 2,
+        "forward_left": 3,
+        "forward_right": 3,
+        "back_left": 1,
+        "back_right": 1
+    },
+    "genes": {
+        "food_weight": 0.09016789073366477,
+        "wall_weight": -0.9438664237134096,
+        "empty_weight": -0.8456666133932796
+    }
+}

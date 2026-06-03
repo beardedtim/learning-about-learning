@@ -1,6 +1,8 @@
 from log import Log
 import random
 import json
+import numpy as np
+import concurrent.futures
 
 #
 # DEFAULTS
@@ -102,14 +104,14 @@ def generate_initial_food(num_items=DEFAULT_INITIAL_FOOD_COUNT):
 
 # Max moves we allow between food
 LIFE_FORCE = 40
-MAX_ITERATIONS = 50000
+MAX_ITERATIONS = 1000
 
 #
 # Genetic Algo Defaults
 #
 GENERATIONS = 50
-POP_SIZE=1000
-MUTATION_RATE=0.075
+POP_SIZE = 1000
+MUTATION_RATE = 0.075
 
 #
 # CONSTS
@@ -505,9 +507,23 @@ class BrainBug(BaseBug):
             
         return new_genes
     
-    def spawn_child(self, mutation_rate):
-        """Returns a brand new BrainBug with mutated genes."""
-        mutated_genes = self.mutate(mutation_rate)
+    def spawn_child(self, mutation_rate, other_parent=None):
+        """Returns a brand new BrainBug with mixed and mutated genes."""
+        
+        # 1. Mix the genes
+        mixed_genes = {}
+        for key in self.genes:
+            if other_parent is not None and random.random() > 0.5:
+                mixed_genes[key] = other_parent.genes[key]
+            else:
+                mixed_genes[key] = self.genes[key]
+                
+        # 2. Mutate the mixed genes
+        mutated_genes = {}
+        for gene_name, weight in mixed_genes.items():
+            tweak = random.uniform(-mutation_rate, mutation_rate)
+            mutated_genes[gene_name] = weight + tweak
+            
         return BrainBug(vision_cone=self.vision_cone, genes=mutated_genes)
     
     def save_to_file(self, filename):
@@ -587,6 +603,71 @@ class NeuralNet:
         
         return NeuralNet(self.input_size, self.hidden_size, self.output_size, (new_W1, new_b1, new_W2, new_b2))
 
+class NumpyNeuralNet:
+    def __init__(self, input_size, hidden_size, output_size, weights=None):
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+
+        # If no weights are provided, generate a completely random brain using NumPy
+        if weights is None:
+            # np.random.uniform generates the entire matrix instantly
+            self.W1 = np.random.uniform(-1, 1, (hidden_size, input_size))
+            self.b1 = np.random.uniform(-1, 1, hidden_size)
+            
+            self.W2 = np.random.uniform(-1, 1, (output_size, hidden_size))
+            self.b2 = np.random.uniform(-1, 1, output_size)
+        else:
+            self.W1, self.b1, self.W2, self.b2 = weights
+
+    def forward(self, inputs):
+        """Passes the vision data through the network using Vectorized math."""
+        # Convert the standard python list of 16 inputs into a fast NumPy array
+        x = np.array(inputs)
+        
+        # 1. Hidden Layer Math: Z = W * X + b (Calculated instantly using dot product)
+        z1 = np.dot(self.W1, x) + self.b1
+        
+        # ReLU Activation Function (np.maximum instantly converts all negative numbers to 0)
+        a1 = np.maximum(0, z1)
+
+        # 2. Output Layer Math
+        z2 = np.dot(self.W2, a1) + self.b2
+
+        # Convert back to a standard Python list so the rest of your bug code understands it
+        return z2.tolist()
+
+    def mutate(self, rate=0.05):
+        """Creates a slightly altered copy of this brain for offspring."""
+        # NumPy allows us to add a matrix of random noise to our entire weight matrix in one line
+        new_W1 = self.W1 + np.random.uniform(-rate, rate, self.W1.shape)
+        new_b1 = self.b1 + np.random.uniform(-rate, rate, self.b1.shape)
+        new_W2 = self.W2 + np.random.uniform(-rate, rate, self.W2.shape)
+        new_b2 = self.b2 + np.random.uniform(-rate, rate, self.b2.shape)
+        
+        return NumpyNeuralNet(self.input_size, self.hidden_size, self.output_size, (new_W1, new_b1, new_W2, new_b2))
+    
+    def crossover(self, other_parent_brain):
+        """Merges this brain with another brain by flipping a coin for each weight."""
+        # 1. Create a 50/50 true/false mask for every matrix
+        # If true, take from self. If false, take from other_parent.
+        mask_W1 = np.random.rand(*self.W1.shape) > 0.5
+        mask_b1 = np.random.rand(*self.b1.shape) > 0.5
+        mask_W2 = np.random.rand(*self.W2.shape) > 0.5
+        mask_b2 = np.random.rand(*self.b2.shape) > 0.5
+
+        # 2. Weave the matrices together
+        child_W1 = np.where(mask_W1, self.W1, other_parent_brain.W1)
+        child_b1 = np.where(mask_b1, self.b1, other_parent_brain.b1)
+        child_W2 = np.where(mask_W2, self.W2, other_parent_brain.W2)
+        child_b2 = np.where(mask_b2, self.b2, other_parent_brain.b2)
+
+        # 3. Return a completely new brain
+        return NumpyNeuralNet(
+            self.input_size, self.hidden_size, self.output_size, 
+            (child_W1, child_b1, child_W2, child_b2)
+        )
+
 class NeuralBug(BaseBug):
     """
     The NeuralBug is allowed to have an actual network of neurons, not just
@@ -605,7 +686,7 @@ class NeuralBug(BaseBug):
         
         # 16 Inputs (8 food, 8 walls), 12 Hidden Neurons, 8 Outputs (Movement choices)
         if brain is None:
-            self.brain = NeuralNet(input_size=16, hidden_size=12, output_size=8)
+            self.brain = NumpyNeuralNet(input_size=16, hidden_size=12, output_size=8)
         else:
             self.brain = brain
 
@@ -652,10 +733,74 @@ class NeuralBug(BaseBug):
 
         return mutated_brain
     
-    def spawn_child(self, mutation_rate):
-        """Returns a brand new NeuralBug with a mutated brain."""
-        mutated_brain = self.mutate(mutation_rate)
+    def spawn_child(self, mutation_rate, other_parent=None):
+        """Returns a brand new NeuralBug with a mixed and mutated brain."""
+        
+        # 1. If we have a mate, mix the brains together
+        if other_parent is not None:
+            mixed_brain = self.brain.crossover(other_parent.brain)
+        else:
+            # Asexual fallback (just copy our own brain)
+            mixed_brain = NumpyNeuralNet(
+                self.brain.input_size, self.brain.hidden_size, self.brain.output_size,
+                (self.brain.W1.copy(), self.brain.b1.copy(), self.brain.W2.copy(), self.brain.b2.copy())
+            )
+            
+        # 2. Mutate the resulting brain
+        mutated_brain = mixed_brain.mutate(mutation_rate)
+        
         return NeuralBug(vision_cone=self.vision_cone, brain=mutated_brain)
+    
+    def save_to_file(self, filename):
+        """Saves the bug's vision cone and neural network weights to a JSON file."""
+        data = {
+            "bug_type": "NeuralBug",
+            "vision_cone": self.vision_cone,
+            "brain": {
+                "input_size": self.brain.input_size,
+                "hidden_size": self.brain.hidden_size,
+                "output_size": self.brain.output_size,
+                # --- Convert NumPy arrays back to standard Python lists for JSON ---
+                "weights": [
+                    self.brain.W1.tolist(), 
+                    self.brain.b1.tolist(), 
+                    self.brain.W2.tolist(), 
+                    self.brain.b2.tolist()
+                ]
+            }
+        }
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        Log.info(f"NeuralBug saved successfully to {filename}")
+
+    @classmethod
+    def load_from_file(cls, filename):
+        """Loads a JSON file and returns a fully reconstructed NeuralBug."""
+        with open(filename, 'r') as f:
+            data = json.load(f)
+            
+        brain_data = data["brain"]
+        saved_weights = brain_data["weights"]
+        
+        # --- Convert the loaded JSON lists back into fast NumPy arrays ---
+        numpy_weights = (
+            np.array(saved_weights[0]), # W1
+            np.array(saved_weights[1]), # b1
+            np.array(saved_weights[2]), # W2
+            np.array(saved_weights[3])  # b2
+        )
+        
+        reconstructed_brain = NumpyNeuralNet(
+            input_size=brain_data["input_size"],
+            hidden_size=brain_data["hidden_size"],
+            output_size=brain_data["output_size"],
+            weights=numpy_weights
+        )
+        
+        return cls(
+            vision_cone=data["vision_cone"], 
+            brain=reconstructed_brain
+        )
 
 
 class Simulation:
@@ -699,46 +844,27 @@ class Simulation:
             "food_collected": food_collected,
             "starved": until_we_die <= 0
         }
+
+#
+# Brokwn out so that we can run in multiprocessing
+#
+def evaluate_single_bug_worker(args):
+    """
+    Top-level worker function for multiprocessing. 
+    Runs the simulation trials for a single bug and returns the average fitness score.
+    """
+    bug, trials, fitness_fn, result_goal = args
+    total_fitness = 0
     
-    def save_to_file(self, filename):
-        """Saves the bug's vision cone and neural network weights to a JSON file."""
-        data = {
-            "bug_type": "NeuralBug",
-            "vision_cone": self.vision_cone,
-            "brain": {
-                "input_size": self.brain.input_size,
-                "hidden_size": self.brain.hidden_size,
-                "output_size": self.brain.output_size,
-                # Package the 4 math arrays into a single list
-                "weights": [self.brain.W1, self.brain.b1, self.brain.W2, self.brain.b2]
-            }
-        }
-
-        with open(filename, 'w') as f:
-            json.dump(data, f, indent=4)
-        Log.info(f"NeuralBug saved successfully to {filename}")
-
-    @classmethod
-    def load_from_file(cls, filename):
-        """Loads a JSON file and returns a fully reconstructed NeuralBug."""
-        with open(filename, 'r') as f:
-            data = json.load(f)
-            
-        brain_data = data["brain"]
+    for _ in range(trials):
+        world = World(initial_food=generate_initial_food())
+        sim = Simulation(world, bug)
+        results = sim.run()
         
-        # 1. Rebuild the NeuralNet object using the saved sizes and weights
-        reconstructed_brain = NeuralNet(
-            input_size=brain_data["input_size"],
-            hidden_size=brain_data["hidden_size"],
-            output_size=brain_data["output_size"],
-            weights=brain_data["weights"]
-        )
+        trial_score = fitness_fn(world, results[result_goal])
+        total_fitness += trial_score
         
-        # 2. Spawn the bug with its new brain and its saved eyes
-        return cls(
-            vision_cone=data["vision_cone"], 
-            brain=reconstructed_brain
-        )
+    return total_fitness / trials
 
 class EvolutionaryTrainer:
     def __init__(self, 
@@ -775,19 +901,21 @@ class EvolutionaryTrainer:
         for gen in range(self.generations):
             
             # 2. Evaluate Fitness via Trials
-            for bug in population:
-                total_fitness = 0
+            
+            # Pack up the arguments each CPU core needs into a tuple
+            worker_args = [
+                (bug, self.trials, self.fitness_fn, self.simulation_result_goal)
+                for bug in population
+            ]
+            
+            # Fire up the CPU cores!
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                # Map maintains the exact order of the list, so score 0 goes to bug 0
+                fitness_scores = list(executor.map(evaluate_single_bug_worker, worker_args))
                 
-                for _ in range(self.trials):
-                    world = World(initial_food=generate_initial_food())
-                    sim = Simulation(world, bug)
-                    results = sim.run()
-                    
-                    trial_score = self.fitness_fn(world, results[self.simulation_result_goal])
-                    total_fitness += trial_score
-                    
-                # Fitness is the true average across all random map trials
-                bug.fitness = total_fitness / self.trials
+            # Assign the calculated scores back to our main population
+            for bug, score in zip(population, fitness_scores):
+                bug.fitness = score
 
             # 3. Sort Population (Highest fitness first)
             population.sort(key=lambda b: getattr(b, 'fitness', -999999), reverse=True)
@@ -809,12 +937,19 @@ class EvolutionaryTrainer:
             parents = population[:num_parents]
             
             next_generation = []
-            next_generation.extend(parents) # Elitism
+            next_generation.extend(parents) # Elitism: The absolute best bugs survive unchanged
             
             while len(next_generation) < self.population_size:
-                parent = random.choice(parents)
+                # Pick two parents randomly from the elite pool
+                parent_a = random.choice(parents)
+                parent_b = random.choice(parents)
                 
-                child_bug = parent.spawn_child(mutation_rate=self.mutation_rate)
+                # They breed!
+                child_bug = parent_a.spawn_child(
+                    mutation_rate=self.mutation_rate, 
+                    other_parent=parent_b
+                )
+                
                 next_generation.append(child_bug)
                 
             population = next_generation
@@ -953,7 +1088,7 @@ if __name__ == "__main__":
 
     best_brain_bug = brain_trainer.train()
 
-    best_brain_bug.save_to_file('best-brain-bug.json')
+    best_brain_bug.save_to_file('best-brain-bug-crossover.json')
 
     # Deep evolution of a NeuralBug maximizing efficiency
     neural_trainer = EvolutionaryTrainer(
@@ -968,4 +1103,37 @@ if __name__ == "__main__":
 
     best_neural_bug = neural_trainer.train()
 
-    best_neural_bug.save_to_file('best-neural-bug.json')
+    best_neural_bug.save_to_file('best-neural-bug-crossover.json')
+
+    print("\n--- TESTING APEX BUG RECOVERY ---")
+
+    try:
+        # 1. Test the BrainBug
+        print("Loading BrainBug...")
+        resurrected_brain_bug = BrainBug.load_from_file('best-brain-bug-crossover.json')
+        
+        # Prove it works by running a simulation
+        brain_world = World(initial_food=generate_initial_food())
+        brain_sim = Simulation(brain_world, resurrected_brain_bug)
+        brain_results = brain_sim.run()
+        
+        print(f"BrainBug successfully loaded and simulated!")
+        print(f"   Score: Survived {brain_results['turns_survived']} turns, Ate {brain_results['food_collected']} food.\n")
+
+
+        # 2. Test the NeuralBug
+        print("Loading NeuralBug...")
+        resurrected_neural_bug = NeuralBug.load_from_file('best-neural-bug-crossover.json')
+        
+        # Prove the NumPy arrays rebuilt correctly by running a simulation
+        neural_world = World(initial_food=generate_initial_food())
+        neural_sim = Simulation(neural_world, resurrected_neural_bug)
+        neural_results = neural_sim.run()
+        
+        print(f"NeuralBug successfully loaded and simulated!")
+        print(f"   Score: Survived {neural_results['turns_survived']} turns, Ate {neural_results['food_collected']} food.\n")
+
+    except FileNotFoundError:
+        print(" Error: JSON files not found. Make sure you run the training loop at least once to generate them!")
+    except Exception as e:
+        print(f" Error during loading or simulation: {e}")

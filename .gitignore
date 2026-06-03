@@ -9,4 +9,4 @@ wheels/
 # Virtual environments
 .venv
 
-simulation_history.log
+./simulation_history.log
