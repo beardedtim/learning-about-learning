@@ -1,5 +1,6 @@
 from log import Log
 import random
+import json
 
 #
 # DEFAULTS
@@ -149,6 +150,10 @@ PLAYER_ARROWS = {
     EAST:  "▶",
     WEST:  "◀"
 }
+
+#
+# Classes/Harnesses
+#
 
 class World:
     def __init__(self, 
@@ -499,6 +504,33 @@ class BrainBug(BaseBug):
             new_genes[gene_name] = weight + tweak
             
         return new_genes
+    
+    def spawn_child(self, mutation_rate):
+        """Returns a brand new BrainBug with mutated genes."""
+        mutated_genes = self.mutate(mutation_rate)
+        return BrainBug(vision_cone=self.vision_cone, genes=mutated_genes)
+    
+    def save_to_file(self, filename):
+        """Saves the bug's vision cone and genetic weights to a JSON file."""
+        data = {
+            "bug_type": "BrainBug",
+            "vision_cone": self.vision_cone,
+            "genes": self.genes
+        }
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        Log.info(f"BrainBug saved successfully to {filename}")
+
+    @classmethod
+    def load_from_file(cls, filename):
+        """Loads a JSON file and returns a fully reconstructed BrainBug."""
+        with open(filename, 'r') as f:
+            data = json.load(f)
+            
+        return cls(
+            vision_cone=data["vision_cone"], 
+            genes=data["genes"]
+        )
 
 class NeuralNet:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
@@ -619,6 +651,11 @@ class NeuralBug(BaseBug):
         mutated_brain = self.brain.mutate(rate=mutation_rate)
 
         return mutated_brain
+    
+    def spawn_child(self, mutation_rate):
+        """Returns a brand new NeuralBug with a mutated brain."""
+        mutated_brain = self.mutate(mutation_rate)
+        return NeuralBug(vision_cone=self.vision_cone, brain=mutated_brain)
 
 
 class Simulation:
@@ -662,6 +699,128 @@ class Simulation:
             "food_collected": food_collected,
             "starved": until_we_die <= 0
         }
+    
+    def save_to_file(self, filename):
+        """Saves the bug's vision cone and neural network weights to a JSON file."""
+        data = {
+            "bug_type": "NeuralBug",
+            "vision_cone": self.vision_cone,
+            "brain": {
+                "input_size": self.brain.input_size,
+                "hidden_size": self.brain.hidden_size,
+                "output_size": self.brain.output_size,
+                # Package the 4 math arrays into a single list
+                "weights": [self.brain.W1, self.brain.b1, self.brain.W2, self.brain.b2]
+            }
+        }
+
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        Log.info(f"NeuralBug saved successfully to {filename}")
+
+    @classmethod
+    def load_from_file(cls, filename):
+        """Loads a JSON file and returns a fully reconstructed NeuralBug."""
+        with open(filename, 'r') as f:
+            data = json.load(f)
+            
+        brain_data = data["brain"]
+        
+        # 1. Rebuild the NeuralNet object using the saved sizes and weights
+        reconstructed_brain = NeuralNet(
+            input_size=brain_data["input_size"],
+            hidden_size=brain_data["hidden_size"],
+            output_size=brain_data["output_size"],
+            weights=brain_data["weights"]
+        )
+        
+        # 2. Spawn the bug with its new brain and its saved eyes
+        return cls(
+            vision_cone=data["vision_cone"], 
+            brain=reconstructed_brain
+        )
+
+class EvolutionaryTrainer:
+    def __init__(self, 
+                 bug_class, 
+                 vision_cone, 
+                 fitness_fn, 
+                 generations=GENERATIONS, 
+                 population_size=POP_SIZE, 
+                 mutation_rate=MUTATION_RATE, 
+                 trials=1,
+                 simulation_result_goal="turns_survived"):
+        
+        self.bug_class = bug_class
+        self.vision_cone = vision_cone
+        self.fitness_fn = fitness_fn
+        self.generations = generations
+        self.population_size = population_size
+        self.mutation_rate = mutation_rate
+        self.trials = trials
+        self.simulation_result_goal = simulation_result_goal
+        
+        self.overall_best_score = -9999999 
+
+    def train(self):
+        fitness_name = self.fitness_fn.__name__.upper()
+        bug_name = self.bug_class.__name__
+        
+        Log.info(f"--- STARTING {bug_name} EVOLUTION ({fitness_name}) ---")
+        Log.info(f"Generations: {self.generations} | Population: {self.population_size} | Trials: {self.trials}")
+
+        # 1. Initialize Generation 0 using the provided class
+        population = [self.bug_class(vision_cone=self.vision_cone) for _ in range(self.population_size)]
+
+        for gen in range(self.generations):
+            
+            # 2. Evaluate Fitness via Trials
+            for bug in population:
+                total_fitness = 0
+                
+                for _ in range(self.trials):
+                    world = World(initial_food=generate_initial_food())
+                    sim = Simulation(world, bug)
+                    results = sim.run()
+                    
+                    trial_score = self.fitness_fn(world, results[self.simulation_result_goal])
+                    total_fitness += trial_score
+                    
+                # Fitness is the true average across all random map trials
+                bug.fitness = total_fitness / self.trials
+
+            # 3. Sort Population (Highest fitness first)
+            population.sort(key=lambda b: getattr(b, 'fitness', -999999), reverse=True)
+            
+            top_score = population[0].fitness
+            avg_score = sum(b.fitness for b in population) / self.population_size
+            
+            Log.info("Generation stats", 
+                gen=gen + 1, 
+                top_score=f"{top_score:.1f}", 
+                avg_score=f"{avg_score:.2f}")
+            
+            if top_score > self.overall_best_score:
+                self.overall_best_score = top_score
+                Log.info(f"New Apex Bug! ({fitness_name} Score: {top_score:.1f})")
+
+            # 4. Selection and Mutation
+            num_parents = max(2, self.population_size // 10)
+            parents = population[:num_parents]
+            
+            next_generation = []
+            next_generation.extend(parents) # Elitism
+            
+            while len(next_generation) < self.population_size:
+                parent = random.choice(parents)
+                
+                child_bug = parent.spawn_child(mutation_rate=self.mutation_rate)
+                next_generation.append(child_bug)
+                
+            population = next_generation
+
+        Log.info(f"\n--- {bug_name} EVOLUTION COMPLETE ---")
+        return population[0] # Return the absolute best bug from the final generation
 
 #
 # Fitness Functions
@@ -775,337 +934,38 @@ def basic_bugs():
         
     print("=====================================================================\n")
 
-
-def train_genetic_algorithm(generations=GENERATIONS, population_size=POP_SIZE, mutation_rate=MUTATION_RATE):
-    print(f"--- STARTING EVOLUTION ---")
-    print(f"Generations: {generations} | Population: {population_size} | Mutation Rate: {mutation_rate}\n")
-    
-    # We will use the 'Radar' vision cone for this test so they have 360 awareness
-    training_cone = VISION_CONES["Radar"]
-    
-    # 1. Initialize the first generation with completely random brains
-    population = [BrainBug(vision_cone=training_cone) for _ in range(population_size)]
-    
-    for gen in range(generations):
-        # Generate a new random food layout for this generation so they don't just memorize one map
-        starting_food = generate_initial_food()
-        
-        # 2. Evaluate Fitness (Run the tournament for every bug)
-        for bug in population:
-            world = World(initial_food=starting_food)
-            until_we_die = LIFE_FORCE
-            
-            for turn in range(MAX_ITERATIONS):
-                until_we_die -= 1
-                
-                perception = world.get_perception(**bug.vision_cone)
-                next_action = bug.request_action(perception=perception)
-                move_result = world.move_relative(next_action)
-                
-                if move_result == "food":
-                    until_we_die = LIFE_FORCE
-            
-                if until_we_die <= 0:
-                    break 
-                    
-            # Save the score directly onto the bug object
-            bug.fitness = getattr(world, 'food_collected', 0)
-
-        # 3. Sort the population by fitness (highest food eaten at the top)
-        population.sort(key=lambda b: getattr(b, 'fitness', 0), reverse=True)
-        
-        # Calculate some stats for the console
-        top_score = population[0].fitness
-        avg_score = sum(b.fitness for b in population) / population_size
-        
-        print(f"Gen {gen + 1:03d} | Top Food: {top_score:<4} | Avg Food: {avg_score:.2f} | Best Genes: "
-              f"Food({population[0].genes['food_weight']:.2f}) "
-              f"Wall({population[0].genes['wall_weight']:.2f}) "
-              f"Empty({population[0].genes['empty_weight']:.2f})")
-
-        # 4. Selection and Mutation (Breed the next generation)
-        # Keep the top 10% of bugs as the "parents"
-        num_parents = max(2, population_size // 10)
-        parents = population[:num_parents]
-        
-        next_generation = []
-        
-        # Elitism: Keep the absolute best bugs exactly as they are so we never lose our progress
-        next_generation.extend(parents)
-        
-        # Fill the rest of the population with mutated children
-        while len(next_generation) < population_size:
-            # Pick a random successful parent
-            parent = random.choice(parents)
-            
-            # Get mutated genes
-            child_genes = parent.mutate(mutation_rate=mutation_rate)
-            
-            # Create the child and add it to the new population
-            child_bug = BrainBug(vision_cone=training_cone, genes=child_genes)
-            next_generation.append(child_bug)
-            
-        # Replace the old population with the new one
-        population = next_generation
-
-    print("\n--- EVOLUTION COMPLETE ---")
-    best_bug = population[0]
-    print(f"Genes:")
-    print(f"Food  Weight: {best_bug.genes['food_weight']:.4f}")
-    print(f"Wall  Weight: {best_bug.genes['wall_weight']:.4f}")
-    print(f"Empty Weight: {best_bug.genes['empty_weight']:.4f}")
-    
-    return best_bug
-
-def train_neural_algorithm(generations=GENERATIONS, population_size=POP_SIZE, mutation_rate=MUTATION_RATE):
-    Log.info("--- STARTING NEURAL EVOLUTION ---")
-    Log.info(f"Generations: {generations} | Population: {population_size} | Mutation Rate: {mutation_rate}\n")
-    
-    training_cone = VISION_CONES["Radar"]
-    
-    # Initialize with NeuralBug
-    population = [NeuralBug(vision_cone=training_cone) for _ in range(population_size)]
-    
-    # Track the best score across ALL generations to log breakthroughs
-    overall_best_score = -1
-    
-    for gen in range(generations):
-        starting_food = generate_initial_food()
-        
-        for bug in population:
-            world = World(initial_food=starting_food)
-            until_we_die = LIFE_FORCE
-            
-            for turn in range(MAX_ITERATIONS):
-                until_we_die -= 1
-                
-                perception = world.get_perception(**bug.vision_cone)
-                next_action = bug.request_action(perception=perception)
-                move_result = world.move_relative(next_action)
-                
-                if move_result == "food":
-                    until_we_die = LIFE_FORCE
-            
-                if until_we_die <= 0:
-                    break 
-                    
-            bug.fitness = getattr(world, 'food_collected', 0)
-
-        population.sort(key=lambda b: getattr(b, 'fitness', 0), reverse=True)
-        
-        top_score = population[0].fitness
-        avg_score = sum(b.fitness for b in population) / population_size
-        
-        # Standard generation heartbeat log
-        print(f"Gen {gen + 1:03d} | Top Food: {top_score:<4} | Avg Food: {avg_score:.2f}")
-
-        # Announce when the AI breaks a new ceiling
-        if top_score > overall_best_score:
-            overall_best_score = top_score
-            Log.debug(f"New Apex Bug evolved in Gen %s with a score of %s!", gen + 1, top_score)
-
-        # 4. Selection and Mutation
-        num_parents = max(2, population_size // 10)
-        parents = population[:num_parents]
-        
-        next_generation = []
-        next_generation.extend(parents)
-        
-        while len(next_generation) < population_size:
-            parent = random.choice(parents)
-            
-            child_brain = parent.mutate(mutation_rate=mutation_rate)
-            child_bug = NeuralBug(vision_cone=training_cone, brain=child_brain)
-            next_generation.append(child_bug)
-            
-        population = next_generation
-
-    Log.info("\n--- NEURAL EVOLUTION COMPLETE ---")
-    best_bug = population[0]
-    Log.info(f"Final Apex Bug reached a top score of {best_bug.fitness}")
-    
-    return best_bug
-
-
-def train_neural_algorithm_with_trials(
-        generations=GENERATIONS, 
-        population_size=POP_SIZE, 
-        mutation_rate=MUTATION_RATE, 
-        trials=3
-        ):
-    Log.info("--- STARTING MULTI-TRIAL NEURAL EVOLUTION ---")
-    Log.info(f"Generations: {generations} | Population: {population_size} | Trials per Bug: {trials} | Mutation Rate: {mutation_rate}\n")
-    
-    # We will use the 'Radar' vision cone for this test so they have 360 awareness
-    training_cone = VISION_CONES["Radar"]
-    
-    # 1. Initialize the first generation with completely random brains
-    population = [NeuralBug(vision_cone=training_cone) for _ in range(population_size)]
-    
-    # Track the best score across ALL generations to log breakthroughs
-    overall_best_score = -1
-    
-    for gen in range(generations):
-        
-        # 2. Evaluate Fitness (Run the multi-trial tournament for every bug)
-        for bug in population:
-            total_score_across_trials = 0
-            
-            for _ in range(trials):
-                # Setup the board and the rules
-                world = World(initial_food=generate_initial_food())
-                sim = Simulation(world, bug)
-                
-                # Run it
-                results = sim.run()
-                
-                # Evaluate it
-                trial_score = fitness_gluttony(world, results["food_collected"])
-                total_fitness_across_trials += trial_score
-                
-            # Fitness is the exact AVERAGE performance across all map layouts
-            bug.fitness = total_score_across_trials / trials
-
-        # 3. Sort the population by true average fitness
-        population.sort(key=lambda b: getattr(b, 'fitness', 0), reverse=True)
-        
-        # Calculate stats for the console
-        top_score = population[0].fitness
-        avg_score = sum(b.fitness for b in population) / population_size
-        
-        # Standard generation heartbeat log
-        print(f"Gen {gen + 1:03d} | Top Avg Food: {top_score:<5.1f} | Pop Avg Food: {avg_score:.2f}")
-
-        # Announce when the AI breaks a new ceiling
-        if top_score > overall_best_score:
-            overall_best_score = top_score
-            Log.info(f"New Top Bug evolved in Gen {gen + 1} with a true average score of {top_score:.1f}!")
-
-        # 4. Selection and Mutation
-        num_parents = max(2, population_size // 10)
-        parents = population[:num_parents]
-        
-        next_generation = []
-        
-        # Elitism: Keep the absolute best bugs exactly as they are
-        next_generation.extend(parents)
-        
-        # Fill the rest of the population with mutated children
-        while len(next_generation) < population_size:
-            parent = random.choice(parents)
-            
-            child_brain = parent.mutate(mutation_rate=mutation_rate)
-            child_bug = NeuralBug(vision_cone=training_cone, brain=child_brain)
-            next_generation.append(child_bug)
-            
-        population = next_generation
-
-    Log.info("\n--- NEURAL EVOLUTION COMPLETE ---")
-    best_bug = population[0]
-    Log.info(f"Final Bug reached a top average score of {best_bug.fitness:.1f}")
-    
-    return best_bug
-
-def train_neural_algorithm_with_trials_and_fitness(
-    generations=GENERATIONS, 
-    population_size=POP_SIZE, 
-    mutation_rate=MUTATION_RATE, 
-    trials=3,
-    fitness_fn=fitness_gluttony
-):
-    # Dynamically log which fitness function is driving this evolution
-    fitness_name = fitness_fn.__name__.upper()
-    Log.info(f"--- STARTING NEURAL EVOLUTION ({fitness_name}) ---")
-    Log.info(f"Generations: {generations} | Population: {population_size} | Trials: {trials}\n")
-    
-    training_cone = VISION_CONES["Radar"]
-    population = [NeuralBug(vision_cone=training_cone) for _ in range(population_size)]
-    overall_best_score = -9999999 
-    
-    for gen in range(generations):
-        
-        for bug in population:
-            total_fitness_across_trials = 0
-            
-            for _ in range(trials):
-                # Setup the board and the rules
-                world = World(initial_food=generate_initial_food())
-                sim = Simulation(world, bug)
-                
-                # Run it
-                results = sim.run()
-                
-                # Evaluate it
-                trial_score = fitness_fn(world, results["turns_survived"])
-                total_fitness_across_trials += trial_score
-                
-            bug.fitness = total_fitness_across_trials / trials
-
-        population.sort(key=lambda b: getattr(b, 'fitness', -99999), reverse=True)
-        
-        top_score = population[0].fitness
-        avg_score = sum(b.fitness for b in population) / population_size
-        
-        print(f"Gen {gen + 1:03d} | Top Score: {top_score:<7.1f} | Avg Score: {avg_score:.2f}")
-
-        if top_score > overall_best_score:
-            overall_best_score = top_score
-            Log.info(f"New Best Bug! ({fitness_name} Score: {top_score:.1f})")
-
-        # 4. Selection and Mutation
-        num_parents = max(2, population_size // 10)
-        parents = population[:num_parents]
-        
-        next_generation = []
-        
-        # Elitism: Keep the absolute best bugs exactly as they are
-        next_generation.extend(parents)
-        
-        # Fill the rest of the population with mutated children
-        while len(next_generation) < population_size:
-            parent = random.choice(parents)
-            
-            child_brain = parent.mutate(mutation_rate=mutation_rate)
-            child_bug = NeuralBug(vision_cone=training_cone, brain=child_brain)
-            next_generation.append(child_bug)
-            
-        population = next_generation
-
-
-    Log.info("\n--- NEURAL EVOLUTION COMPLETE ---")
-    best_bug = population[0]
-    Log.info(f"Final Bug reached a top average score of {best_bug.fitness:.1f}")
-    
-    return best_bug
-
 if __name__ == "__main__":
     #
-    # Basic Bugs tests the Rules based bugs
+    # Basic Bugs as a base line
     #
     basic_bugs()
+    
+    # Test of a basic BrainBug focused purely on eating
+    brain_trainer = EvolutionaryTrainer(
+        bug_class=BrainBug,
+        vision_cone=VISION_CONES["Balanced"],
+        fitness_fn=fitness_gluttony,
+        generations=GENERATIONS,
+        population_size=POP_SIZE,
+        mutation_rate=MUTATION_RATE,
+        trials=3
+    )
 
-    #
-    # Genetic Algorithm is simple weights and outputs.
-    # Think of them like a cell: it gets input and can
-    # decide to move somewhere but that's it.
-    #
-    # train_genetic_algorithm()
+    best_brain_bug = brain_trainer.train()
 
-    #
-    # Neural Networks
-    # Now we are getting into the fun stuff. This gets to
-    # have a real "brain", with hidden "layers", activation,
-    # all those magic words. 
-    #
-    # train_neural_algorithm()
-    # train_neural_algorithm_with_trials()
+    best_brain_bug.save_to_file('best-brain-bug.json')
 
-    #
-    # Train with Trials and Fitness
-    #
-    # allows you to give it a custom fitness function and runs the
-    # Bug through generations of testing, driving by args or CONSTS above
-    #
-    train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_gluttony)
-    train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_longevity)
-    train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_efficiency)
+    # Deep evolution of a NeuralBug maximizing efficiency
+    neural_trainer = EvolutionaryTrainer(
+        bug_class=NeuralBug,
+        vision_cone=VISION_CONES["Radar"],
+        fitness_fn=fitness_efficiency,
+        generations=GENERATIONS,
+        population_size=POP_SIZE,
+        mutation_rate=MUTATION_RATE,
+        trials=3
+    )
+
+    best_neural_bug = neural_trainer.train()
+
+    best_neural_bug.save_to_file('best-neural-bug.json')

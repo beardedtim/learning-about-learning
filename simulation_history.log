@@ -1,34 +1,29 @@
-2026-06-03 14:32:25 [info     ] --- STARTING NEURAL EVOLUTION (FITNESS_GLUTTONY) ---
-2026-06-03 14:32:25 [info     ] Generations: 50 | Population: 1000 | Trials: 3
-
-2026-06-03 14:32:27 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 8.3)
-2026-06-03 14:32:30 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 9.7)
-2026-06-03 14:32:32 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 38.3)
-2026-06-03 14:32:49 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 57.3)
-2026-06-03 14:33:05 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 81.3)
-2026-06-03 14:33:15 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 84.3)
-2026-06-03 14:33:36 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 87.7)
-2026-06-03 14:33:58 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 98.3)
-2026-06-03 14:34:09 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 144.7)
-2026-06-03 14:34:47 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 190.3)
-2026-06-03 14:35:01 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 198.0)
-2026-06-03 14:35:32 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 310.3)
-2026-06-03 14:37:23 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 397.3)
-2026-06-03 14:38:33 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 420.0)
-2026-06-03 14:39:01 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 490.7)
-2026-06-03 14:39:32 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 571.3)
-2026-06-03 14:40:41 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 734.0)
-2026-06-03 14:42:43 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 1133.3)
-2026-06-03 14:48:48 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 1934.7)
-2026-06-03 14:51:51 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 2081.0)
-2026-06-03 14:56:28 [info     ] 
---- NEURAL EVOLUTION COMPLETE ---
-2026-06-03 14:56:28 [info     ] Final Bug reached a top average score of 1162.3
-2026-06-03 14:56:28 [info     ] --- STARTING NEURAL EVOLUTION (FITNESS_LONGEVITY) ---
-2026-06-03 14:56:28 [info     ] Generations: 50 | Population: 1000 | Trials: 3
-
-2026-06-03 14:56:30 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 141.0)
-2026-06-03 14:56:32 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 254.0)
-2026-06-03 14:56:36 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 540.0)
-2026-06-03 14:56:41 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 552.0)
-2026-06-03 14:56:56 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 585.7)
+2026-06-03 15:20:21 [info     ] --- STARTING BrainBug EVOLUTION (FITNESS_GLUTTONY) ---
+2026-06-03 15:20:21 [info     ] Generations: 50 | Population: 1000 | Trials: 3
+2026-06-03 15:20:24 [info     ] Generation stats               avg_score=25.03 gen=1 top_score=285.3
+2026-06-03 15:20:24 [info     ] New Apex Bug! (FITNESS_GLUTTONY Score: 285.3)
+2026-06-03 15:20:34 [info     ] Generation stats               avg_score=84.48 gen=2 top_score=399.3
+2026-06-03 15:20:34 [info     ] New Apex Bug! (FITNESS_GLUTTONY Score: 399.3)
+2026-06-03 15:20:45 [info     ] Generation stats               avg_score=90.48 gen=3 top_score=426.0
+2026-06-03 15:20:45 [info     ] New Apex Bug! (FITNESS_GLUTTONY Score: 426.0)
+2026-06-03 15:20:55 [info     ] Generation stats               avg_score=88.86 gen=4 top_score=433.0
+2026-06-03 15:20:55 [info     ] New Apex Bug! (FITNESS_GLUTTONY Score: 433.0)
+2026-06-03 15:21:05 [info     ] Generation stats               avg_score=90.99 gen=5 top_score=431.7
+2026-06-03 15:21:15 [info     ] Generation stats               avg_score=86.66 gen=6 top_score=341.7
+2026-06-03 15:21:26 [info     ] Generation stats               avg_score=91.78 gen=7 top_score=430.7
+2026-06-03 15:21:36 [info     ] Generation stats               avg_score=91.26 gen=8 top_score=527.0
+2026-06-03 15:21:36 [info     ] New Apex Bug! (FITNESS_GLUTTONY Score: 527.0)
+2026-06-03 15:21:47 [info     ] Generation stats               avg_score=90.33 gen=9 top_score=435.7
+2026-06-03 15:21:57 [info     ] Generation stats               avg_score=92.84 gen=10 top_score=604.3
+2026-06-03 15:21:57 [info     ] New Apex Bug! (FITNESS_GLUTTONY Score: 604.3)
+2026-06-03 15:22:07 [info     ] Generation stats               avg_score=89.78 gen=11 top_score=416.0
+2026-06-03 15:22:17 [info     ] Generation stats               avg_score=87.31 gen=12 top_score=395.7
+2026-06-03 15:22:27 [info     ] Generation stats               avg_score=87.23 gen=13 top_score=467.7
+2026-06-03 15:22:38 [info     ] Generation stats               avg_score=91.65 gen=14 top_score=440.7
+2026-06-03 15:22:48 [info     ] Generation stats               avg_score=92.33 gen=15 top_score=448.0
+2026-06-03 15:22:58 [info     ] Generation stats               avg_score=92.72 gen=16 top_score=425.0
+2026-06-03 15:23:09 [info     ] Generation stats               avg_score=90.83 gen=17 top_score=449.7
+2026-06-03 15:23:19 [info     ] Generation stats               avg_score=89.68 gen=18 top_score=369.7
+2026-06-03 15:23:29 [info     ] Generation stats               avg_score=89.06 gen=19 top_score=338.7
+2026-06-03 15:23:39 [info     ] Generation stats               avg_score=90.23 gen=20 top_score=461.7
+2026-06-03 15:23:49 [info     ] Generation stats               avg_score=90.39 gen=21 top_score=379.7
