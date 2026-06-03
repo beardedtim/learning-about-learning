@@ -3,12 +3,12 @@ import random
 import json
 import numpy as np
 import concurrent.futures
-
+import os
 #
 # DEFAULTS
 
 # How many times we want to run each Bug through the trial?
-NUM_EPOCHS = 1000
+NUM_EPOCHS = 250
 
 # Position is (0, 0) top left, (MAX_X, MAX_Y bottom right)
 # Max width we allow for the world
@@ -256,15 +256,16 @@ def generate_walls(layout="empty"):
     return list(walls)
 
 # Max moves we allow between food
-LIFE_FORCE = 50
-MAX_ITERATIONS = 5000
+LIFE_FORCE = 25
+MAX_ITERATIONS = 10000
 
 #
 # Genetic Algo Defaults
 #
-GENERATIONS = 50
-POP_SIZE = 500
+GENERATIONS = 250
+POP_SIZE = 5000
 MUTATION_RATE = 0.075
+TRIALS_PER_EPOCH = 5
 
 #
 # CONSTS
@@ -685,9 +686,8 @@ class BrainBug(BaseBug):
                     break # We found food, stop scanning this direction
                     
                 elif tile == WALL_CHAR:
-                    # Only penalize walls if they are the immediate next step
-                    if distance == 1:
-                        score += self.genes["wall_weight"]
+                    # Penalize walls blocking this direction
+                    score += self.genes["wall_weight"]
                     break # You can't see past a wall, stop scanning
             
             # If we looked down this path and saw no food, apply the empty space weight
@@ -752,61 +752,6 @@ class BrainBug(BaseBug):
             genes=data["genes"]
         )
 
-class NeuralNet:
-    def __init__(self, input_size, hidden_size, output_size, weights=None):
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-
-        # If no weights are provided, generate a completely random brain
-        if weights is None:
-            # W1: Weights from Input to Hidden Layer
-            self.W1 = [[random.uniform(-1, 1) for _ in range(input_size)] for _ in range(hidden_size)]
-            self.b1 = [random.uniform(-1, 1) for _ in range(hidden_size)]
-            
-            # W2: Weights from Hidden to Output Layer
-            self.W2 = [[random.uniform(-1, 1) for _ in range(hidden_size)] for _ in range(output_size)]
-            self.b2 = [random.uniform(-1, 1) for _ in range(output_size)]
-        else:
-            self.W1, self.b1, self.W2, self.b2 = weights
-
-    def forward(self, inputs):
-        """Passes the vision data through the network to get movement scores."""
-        
-        # 1. Hidden Layer Math: Z = W * X + b
-        hidden = []
-        for i in range(self.hidden_size):
-            activation = self.b1[i]
-            for j in range(self.input_size):
-                activation += inputs[j] * self.W1[i][j]
-                
-            # ReLU Activation Function (converts negative numbers to 0)
-            hidden.append(max(0.0, activation))
-
-        # 2. Output Layer Math
-        outputs = []
-        for i in range(self.output_size):
-            activation = self.b2[i]
-            for j in range(self.hidden_size):
-                activation += hidden[j] * self.W2[i][j]
-            outputs.append(activation) 
-
-        return outputs
-
-    def mutate(self, rate=0.05):
-        """Creates a slightly altered copy of this brain for offspring."""
-        def mutate_matrix(mat):
-            return [[w + random.uniform(-rate, rate) for w in row] for row in mat]
-        def mutate_vector(vec):
-            return [v + random.uniform(-rate, rate) for v in vec]
-
-        new_W1 = mutate_matrix(self.W1)
-        new_b1 = mutate_vector(self.b1)
-        new_W2 = mutate_matrix(self.W2)
-        new_b2 = mutate_vector(self.b2)
-        
-        return NeuralNet(self.input_size, self.hidden_size, self.output_size, (new_W1, new_b1, new_W2, new_b2))
-
 class NumpyNeuralNet:
     def __init__(self, input_size, hidden_size, output_size, weights=None):
         self.input_size = input_size
@@ -816,21 +761,17 @@ class NumpyNeuralNet:
         # If no weights are provided, generate a completely random brain using NumPy
         if weights is None:
             # np.random.uniform generates the entire matrix instantly
-            self.W1 = np.random.uniform(-1, 1, (hidden_size, input_size))
-            self.b1 = np.random.uniform(-1, 1, hidden_size)
-            
-            self.W2 = np.random.uniform(-1, 1, (output_size, hidden_size))
-            self.b2 = np.random.uniform(-1, 1, output_size)
+            self.W1 = np.random.uniform(-1, 1, (hidden_size, input_size)).astype(np.float32)
+            self.b1 = np.random.uniform(-1, 1, hidden_size).astype(np.float32)
+            self.W2 = np.random.uniform(-1, 1, (output_size, hidden_size)).astype(np.float32)
+            self.b2 = np.random.uniform(-1, 1, output_size).astype(np.float32)
         else:
             self.W1, self.b1, self.W2, self.b2 = weights
 
     def forward(self, inputs):
         """Passes the vision data through the network using Vectorized math."""
-        # Convert the standard python list of inputs into a fast NumPy array
-        x = np.array(inputs)
-        
         # 1. Hidden Layer Math: Z = W * X + b
-        z1 = np.dot(self.W1, x) + self.b1
+        z1 = np.dot(self.W1, inputs) + self.b1
         
         # ReLU Activation Function (converts negative numbers to 0)
         a1 = np.maximum(0, z1)
@@ -919,9 +860,11 @@ class NeuralBug(BaseBug):
                 
                 if tile == FOOD_CHAR and food_score == 0:
                     food_score = 1.0 / distance # Closer food = higher score
-                elif tile == WALL_CHAR and distance == 1:
-                    wall_score = 1.0 # 1.0 means a wall is touching us
-                    break
+                
+                if tile == WALL_CHAR:
+                    if distance == 1:
+                        wall_score = 1.0 # 1.0 means a wall is touching us
+                    break # Stop scanning - you can't see past walls
                     
             food_inputs.append(food_score)
             wall_inputs.append(wall_score)
@@ -931,7 +874,7 @@ class NeuralBug(BaseBug):
         normalized_hunger = current_life / max_life
 
         # Combine them into a single list of 16 numbers
-        inputs = food_inputs + wall_inputs + [normalized_hunger]
+        inputs = np.array(food_inputs + wall_inputs + [normalized_hunger], dtype=np.float32)
 
         # --- THINK ---
         # Pass the inputs into the neural network to get 8 output scores
@@ -1004,10 +947,10 @@ class NeuralBug(BaseBug):
         
         # --- Convert the loaded JSON lists back into fast NumPy arrays ---
         numpy_weights = (
-            np.array(saved_weights[0]), # W1
-            np.array(saved_weights[1]), # b1
-            np.array(saved_weights[2]), # W2
-            np.array(saved_weights[3])  # b2
+            np.array(saved_weights[0], dtype=np.float32),
+            np.array(saved_weights[1], dtype=np.float32),
+            np.array(saved_weights[2], dtype=np.float32),
+            np.array(saved_weights[3], dtype=np.float32),
         )
         
         reconstructed_brain = NumpyNeuralNet(
@@ -1072,9 +1015,11 @@ class MemoryBug(BaseBug):
                 
                 if tile == FOOD_CHAR and food_score == 0:
                     food_score = 1.0 / distance 
-                elif tile == WALL_CHAR and distance == 1:
-                    wall_score = 1.0 
-                    break
+                
+                if tile == WALL_CHAR:
+                    if distance == 1:
+                        wall_score = 1.0 
+                    break # Stop scanning - you can't see past walls
                     
             food_inputs.append(food_score)
             wall_inputs.append(wall_score)
@@ -1164,10 +1109,10 @@ class MemoryBug(BaseBug):
         saved_weights = brain_data["weights"]
         
         numpy_weights = (
-            np.array(saved_weights[0]), 
-            np.array(saved_weights[1]), 
-            np.array(saved_weights[2]), 
-            np.array(saved_weights[3])  
+            np.array(saved_weights[0], dtype=np.float32),
+            np.array(saved_weights[1], dtype=np.float32),
+            np.array(saved_weights[2], dtype=np.float32),
+            np.array(saved_weights[3], dtype=np.float32),
         )
         
         reconstructed_brain = NumpyNeuralNet(
@@ -1287,61 +1232,59 @@ class EvolutionaryTrainer:
         # 1. Initialize Generation 0 using the provided class
         population = [self.bug_class(vision_cone=self.vision_cone) for _ in range(self.population_size)]
 
-        for gen in range(self.generations):
-            
-            # 2. Evaluate Fitness via Trials
-            
-            # Pack up the arguments each CPU core needs into a tuple
-            worker_args = [
-                (bug, self.trials, self.fitness_fn, self.simulation_result_goal, self.map_layout)
-                for bug in population
-            ]
-            
-            # Fire up the CPU cores!
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                # Map maintains the exact order of the list, so score 0 goes to bug 0
-                fitness_scores = list(executor.map(evaluate_single_bug_worker, worker_args))
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for gen in range(self.generations):
+                # 2. Evaluate Fitness via Trials
                 
-            # Assign the calculated scores back to our main population
-            for bug, score in zip(population, fitness_scores):
-                bug.fitness = score
+                # Pack up the arguments each CPU core needs into a tuple
+                worker_args = [
+                    (bug, self.trials, self.fitness_fn, self.simulation_result_goal, self.map_layout)
+                    for bug in population
+                ]
+                
+                chunksize = max(1, self.population_size // (os.cpu_count() * 4))
+                fitness_scores = list(executor.map(evaluate_single_bug_worker, worker_args, chunksize=chunksize))
+                    
+                # Assign the calculated scores back to our main population
+                for bug, score in zip(population, fitness_scores):
+                    bug.fitness = score
 
-            # 3. Sort Population (Highest fitness first)
-            population.sort(key=lambda b: getattr(b, 'fitness', -999999), reverse=True)
-            
-            top_score = population[0].fitness
-            avg_score = sum(b.fitness for b in population) / self.population_size
-            
-            Log.info("Generation stats", 
-                gen=gen + 1, 
-                top_score=f"{top_score:.1f}", 
-                avg_score=f"{avg_score:.2f}")
-            
-            if top_score > self.overall_best_score:
-                self.overall_best_score = top_score
-                Log.info(f"New Apex Bug! ({fitness_name} Score: {top_score:.1f})")
+                # 3. Sort Population (Highest fitness first)
+                population.sort(key=lambda b: getattr(b, 'fitness', -999999), reverse=True)
+                
+                top_score = population[0].fitness
+                avg_score = sum(b.fitness for b in population) / self.population_size
+                
+                Log.info("Generation stats", 
+                    gen=gen + 1, 
+                    top_score=f"{top_score:.1f}", 
+                    avg_score=f"{avg_score:.2f}")
+                
+                if top_score > self.overall_best_score:
+                    self.overall_best_score = top_score
+                    Log.info(f"New Apex Bug! ({fitness_name} Score: {top_score:.1f})")
 
-            # 4. Selection and Mutation
-            num_parents = max(2, self.population_size // 10)
-            parents = population[:num_parents]
-            
-            next_generation = []
-            next_generation.extend(parents) # Elitism: The absolute best bugs survive unchanged
-            
-            while len(next_generation) < self.population_size:
-                # Pick two parents randomly from the elite pool
-                parent_a = random.choice(parents)
-                parent_b = random.choice(parents)
+                # 4. Selection and Mutation
+                num_parents = max(2, self.population_size // 10)
+                parents = population[:num_parents]
                 
-                # They breed!
-                child_bug = parent_a.spawn_child(
-                    mutation_rate=self.mutation_rate, 
-                    other_parent=parent_b
-                )
+                next_generation = []
+                next_generation.extend(parents) # Elitism: The absolute best bugs survive unchanged
                 
-                next_generation.append(child_bug)
-                
-            population = next_generation
+                while len(next_generation) < self.population_size:
+                    # Pick two parents randomly from the elite pool
+                    parent_a = random.choice(parents)
+                    parent_b = random.choice(parents)
+                    
+                    # They breed!
+                    child_bug = parent_a.spawn_child(
+                        mutation_rate=self.mutation_rate, 
+                        other_parent=parent_b
+                    )
+                    
+                    next_generation.append(child_bug)
+                    
+                population = next_generation
 
         Log.info(f"\n--- {bug_name} EVOLUTION COMPLETE ---")
         return population[0] # Return the absolute best bug from the final generation
@@ -1356,6 +1299,7 @@ def fitness_gluttony(world, turns_survived):
     """
     The 'Yo, food is good' mindset.
     Ignores how many turns it took, solely rewards the amount of food eaten.
+    Pure greed - only cares about feast quantity.
     """
     return float(getattr(world, 'food_collected', 0))
 
@@ -1363,6 +1307,7 @@ def fitness_longevity(world, turns_survived):
     """
     The survivalist mindset.
     Rewards staying alive as long as possible. Food is only a means to an end.
+    Pure endurance - maximize lifespan regardless of consumption.
     """
     return float(turns_survived)
 
@@ -1370,121 +1315,122 @@ def fitness_efficiency(world, turns_survived):
     """
     A hybrid mindset.
     Rewards eating food, but PENALIZES taking too long to do it. 
+    Balanced approach - food matters, but speed matters more.
     """
     food = getattr(world, 'food_collected', 0)
     # 50 points per food, minus 1 point for every turn wasted
     return (food * 50.0) - turns_survived
 
+def fitness_speed_raider(world, turns_survived):
+    """
+    The aggressive hunter.
+    Heavily rewards early food consumption - first meal is CRITICAL.
+    If no food found, penalty scales over time.
+    Specializes in resource-dense environments and direct paths.
+    """
+    food = getattr(world, 'food_collected', 0)
+    if food == 0:
+        # Severe penalty for never finding food
+        return -turns_survived
+    # Exponential reward for eating fast (first food most valuable)
+    # Each food eaten at turn T gets: 100 / sqrt(T)
+    # This heavily favors finding food quickly
+    return (food * 100.0) - (turns_survived * 0.5)
 
-def basic_bugs():
-    # Build a list of tuples: (BugClass, ConeName, ConeDictionary)
-    # This lets you pit different classes AND different eyes against each other
-    competitors = [
-        (RandomBug, "Balanced", VISION_CONES["Balanced"]),
-        (RandomBug, "Tunnel", VISION_CONES["Tunnel"]),
-        (RandomBug, "Prey", VISION_CONES["Prey"]),
-        (RandomBug, "Radar", VISION_CONES["Radar"]),
-        (ForwardBug, "Balanced", VISION_CONES["Balanced"]),
-        (ForwardBug, "Tunnel", VISION_CONES["Tunnel"]),
-        (ForwardBug, "Prey", VISION_CONES["Prey"]),
-        (ForwardBug, "Radar", VISION_CONES["Radar"])
-    ] 
-    
-    # This dictionary will store all the final stats
-    tournament_results = {}
-    
-    print(f"STARTING TOURNAMENT: {NUM_EPOCHS} Epochs per Bug\n")
-    starting_food = generate_initial_food()
-    print(f"Starting with food {starting_food}")
-    
-    for BugClass, cone_name, cone_dict in competitors:
-        # Create a unique name for the scoreboard (e.g., "ForwardBug (Tunnel)")
-        bug_name = f"{BugClass.__name__} ({cone_name})"
-        print(f"Testing {bug_name}...")
-        
-        # Trackers for this specific Bug type
-        total_turns = 0
-        total_food = 0
-        max_food_in_one_run = 0
-        starvations = 0
+def fitness_sustenance(world, turns_survived):
+    """
+    The steady forager.
+    Rewards consistent food-finding over time. The rate of food consumption matters.
+    (food / turns_survived) gives consumption rate - bugs that find food regularly win.
+    Penalizes both starvation AND wandering without eating.
+    """
+    food = getattr(world, 'food_collected', 0)
+    if turns_survived == 0:
+        return 0.0
+    consumption_rate = food / float(turns_survived)
+    # Scale by turns survived to prefer bugs that both eat AND survive
+    return (consumption_rate * 1000.0) + (turns_survived * 0.1)
 
-        # Run the epochs for this bug
-        for _ in range(NUM_EPOCHS):
-            world = World(initial_food=starting_food)
-            
-            # Pass the vision_cone dictionary directly into the bug on spawn
-            bug = BugClass(vision_cone=cone_dict) 
-            
-            until_we_die = LIFE_FORCE
-            
-            for turn in range(MAX_ITERATIONS):
-                until_we_die -= 1
-                
-                # The bug uses its own vision cone property
-                perception = world.get_perception(**bug.vision_cone)
-                next_action = bug.request_action(perception=perception)
-                move_result = world.move_relative(next_action)
-                
-                if move_result == "food":
-                    until_we_die = LIFE_FORCE
-            
-                if until_we_die <= 0:
-                    starvations += 1
-                    break 
-                    
-            # Tally stats at the end of the epoch
-            food_eaten = getattr(world, 'food_collected', 0)
-            
-            total_turns += turn
-            total_food += food_eaten
-            if food_eaten > max_food_in_one_run:
-                max_food_in_one_run = food_eaten
+def fitness_balanced(world, turns_survived):
+    """
+    The Swiss Army knife.
+    Rewards a balanced approach: need both food AND longevity equally.
+    Geometric mean of (food * 50) and turns_survived.
+    Great all-rounder, but not specialized in anything.
+    """
+    food = getattr(world, 'food_collected', 0)
+    food_score = max(1, food * 50.0)  # Avoid log(0)
+    survival_score = max(1, float(turns_survived))
+    # Geometric mean - punishes imbalance
+    return (food_score * survival_score) ** 0.5
 
-        # Calculate Averages for this Bug
-        tournament_results[bug_name] = {
-            "avg_turns": total_turns / NUM_EPOCHS,
-            "avg_food": total_food / NUM_EPOCHS,
-            "max_food": max_food_in_one_run,
-            "survival_rate": ((NUM_EPOCHS - starvations) / NUM_EPOCHS) * 100
-        }
+def fitness_minimalist(world, turns_survived):
+    """
+    The ascetic philosopher.
+    Rewards LONGEVITY while finding ANY food at all.
+    Gets a baseline for surviving, bonus ONLY if food is found.
+    Bugs that starve get turns_survived/2. Bugs that eat get bonus.
+    """
+    food = getattr(world, 'food_collected', 0)
+    base_score = turns_survived / 2.0
+    food_bonus = food * 30.0
+    return base_score + food_bonus
 
-    # --- Print the Side-by-Side Comparison ---
-    print("\n=====================================================================")
-    print(f" {'BUG TYPE & EYES':<25} | {'AVG TURNS':<10} | {'AVG FOOD':<10} | {'MAX FOOD':<8}")
-    print("=====================================================================")
-    
-    for bug_name, stats in tournament_results.items():
-        print(f" {bug_name:<25} | {stats['avg_turns']:<10.1f} | {stats['avg_food']:<10.2f} | {stats['max_food']:<8}")
-        
-    print("=====================================================================\n")
+def fitness_feast_or_famine(world, turns_survived):
+    """
+    The risk-taker's paradox.
+    Extreme risk-reward: massive bonus for finding food quickly, harsh penalty for starvation.
+    Only food count matters - turns are a tiebreaker.
+    Winners: bugs that find ANY food (even 1) survive. Losers: bugs that find nothing.
+    Creates extreme specialization pressure.
+    """
+    food = getattr(world, 'food_collected', 0)
+    if food == 0:
+        return turns_survived - 100.0  # Severe starvation penalty
+    # Every food is worth a LOT - makes specialization attractive
+    return food * 200.0
 
 if __name__ == "__main__":
-    # basic_bugs()
-    reactive_trainer = EvolutionaryTrainer(
-        bug_class=NeuralBug,
-        vision_cone=VISION_CONES["Radar"],
-        fitness_fn=fitness_gluttony,
-        generations=GENERATIONS,
-        population_size=POP_SIZE,
-        mutation_rate=MUTATION_RATE,
-        map_layout="maze",
-        trials=3
-    )
+    #
+    # Training Config
+    #
+    fitness_fns = [
+        fitness_efficiency, 
+        fitness_gluttony, 
+        fitness_longevity,
+        fitness_speed_raider,
+        fitness_sustenance,
+        fitness_balanced,
+        fitness_minimalist,
+        fitness_feast_or_famine
+    ]
 
-    best_reactive_bug = reactive_trainer.train()
-    best_reactive_bug.save_to_file('best-neural-bug-crossover-maze-gluttony.json')
+    for fitness_fn in fitness_fns:
+        for name, vision in VISION_CONES.items():
+            trainer_neural = EvolutionaryTrainer(
+                bug_class=NeuralBug,
+                vision_cone=vision,
+                generations=GENERATIONS,
+                population_size=POP_SIZE,
+                mutation_rate=MUTATION_RATE,
+                fitness_fn=fitness_fn,
+                map_layout="maze",
+                trials=TRIALS_PER_EPOCH
+            )
 
+            trainer_memory = EvolutionaryTrainer(
+                bug_class=MemoryBug,
+                vision_cone=vision,
+                fitness_fn=fitness_fn,
+                generations=GENERATIONS,
+                population_size=POP_SIZE,
+                mutation_rate=MUTATION_RATE,
+                map_layout="maze",
+                trials=TRIALS_PER_EPOCH
+            )
 
-    memory_trainer = EvolutionaryTrainer(
-        bug_class=MemoryBug,
-        vision_cone=VISION_CONES["Radar"],
-        fitness_fn=fitness_gluttony,
-        generations=GENERATIONS,
-        population_size=POP_SIZE,
-        mutation_rate=MUTATION_RATE,
-        map_layout="maze",
-        trials=3
-    )
+            best_neural = trainer_neural.train()
+            best_neural.save_to_file(f'bug_saves/neural-{name}-{fitness_fn.__name__}-maze.json')
 
-    best_memory_bug = memory_trainer.train()
-    best_memory_bug.save_to_file('best-memory-bug-crossover-maze-gluttony.json')
+            best_memory = trainer_memory.train()
+            best_memory.save_to_file(f"bug_saves/memory-{name}-{fitness_fn.__name__}-maze.json")
