@@ -83,34 +83,187 @@ VISION_CONES = {
 DEFAULT_VISION_CONE = VISION_CONES.get("Balanced")
 
 
-def generate_initial_food(num_items=DEFAULT_INITIAL_FOOD_COUNT):
+def generate_initial_food(walls=None, num_items=DEFAULT_INITIAL_FOOD_COUNT):
     """
     Randomly generates a list of unique food coordinates.
-    Ensures food does not spawn on the player's starting position.
+    Ensures food does not spawn on the player or inside a wall.
     """
-    food_positions = set() # Using a set automatically prevents duplicate coordinates
+    food_positions = set()
+    wall_set = set(walls) if walls else set()
     
     while len(food_positions) < num_items:
-        # Generate random x and y coordinates within the grid bounds
-        x = random.randint(0, MAX_X)
-        y = random.randint(0, MAX_Y)
+        x = random.randint(1, MAX_X - 1)
+        y = random.randint(1, MAX_Y - 1)
         new_pos = (x, y)
         
-        # Add to our set only if it isn't the player's starting spot
-        if new_pos != PLAYER_START and new_pos not in food_positions:
+        # --- Check that the spot isn't a wall ---
+        if new_pos != PLAYER_START and new_pos not in food_positions and new_pos not in wall_set:
             food_positions.add(new_pos)
             
     return list(food_positions)
 
+def generate_walls(layout="empty"):
+    """Generates a list of coordinates for wall placements based on a layout preset."""
+    walls = set()
+    
+    if layout == "empty":
+        return []
+        
+    elif layout == "scattered":
+        # Drop 20 random blocks around the map
+        for _ in range(20):
+            x = random.randint(2, MAX_X - 2)
+            y = random.randint(2, MAX_Y - 2)
+            if (x, y) != PLAYER_START:
+                walls.add((x, y))
+                
+    elif layout == "divider":
+        # Draw a solid wall down the middle of the map with a gap in the center
+        mid_x = MAX_X // 2
+        gap_start = (MAX_Y // 2) - 2
+        gap_end = (MAX_Y // 2) + 2
+        
+        for y in range(1, MAX_Y):
+            # If we are NOT in the gap, place a wall
+            if not (gap_start <= y <= gap_end):
+                walls.add((mid_x, y))
+
+    elif layout == "u_trap":
+        # Creates a large U-shape holding pit in the center of the map.
+        mid_x = MAX_X // 2
+        mid_y = MAX_Y // 2
+
+        # Bottom of the U
+        for x in range(mid_x - 4, mid_x + 5):
+            walls.add((x, mid_y + 2))
+
+        # Left and Right walls of the U
+        for y in range(mid_y - 3, mid_y + 3):
+            walls.add((mid_x - 4, y))
+            walls.add((mid_x + 4, y))
+    elif layout == "maze":
+        # 1. Fill the entire inner grid with walls
+        for x in range(1, MAX_X):
+            for y in range(1, MAX_Y):
+                walls.add((x, y))
+
+        # 2. Carve a perfect maze using Recursive Backtracking (DFS)
+        # We step by 2 so we always leave a 1-tile thick wall between our paths
+        start_x, start_y = 1, 1
+        walls.discard((start_x, start_y))
+        stack = [(start_x, start_y)]
+
+        while stack:
+            cx, cy = stack[-1]
+            
+            # Find all valid neighbors that are 2 steps away AND are still solid walls
+            neighbors = []
+            for dx, dy in [(0, 2), (0, -2), (2, 0), (-2, 0)]:
+                nx, ny = cx + dx, cy + dy
+                # Check if the target is within bounds and uncarved
+                if 0 < nx < MAX_X and 0 < ny < MAX_Y and (nx, ny) in walls:
+                    neighbors.append((nx, ny, dx, dy))
+
+            if neighbors:
+                # Pick a random valid direction to dig
+                nx, ny, dx, dy = random.choice(neighbors)
+                
+                # Carve the destination cell
+                walls.discard((nx, ny))
+                
+                # Carve the wall *between* the current cell and the destination
+                walls.discard((cx + dx // 2, cy + dy // 2))
+                
+                # Move to the new cell
+                stack.append((nx, ny))
+            else:
+                # We hit a dead end! Backtrack to the previous intersection
+                stack.pop()
+
+        # 3. Rescue the Player!
+        # Because the algorithm carves on ODD coordinates (1, 3, 5), EVEN coordinates 
+        # like the default PLAYER_START (10, 10) are solid permanent pillars. 
+        # We must manually carve out the player's spawn and connect them to the maze.
+        walls.discard(PLAYER_START)
+        
+        px, py = PLAYER_START
+        if px % 2 == 0: 
+            walls.discard((px - 1, py)) # Dig a path to the left
+        if py % 2 == 0: 
+            walls.discard((px, py - 1)) # Dig a path up
+            
+        # 4. The "Mercy" Mechanic (Braid Maze)
+        # A "perfect" maze has exactly ONE path between any two points and zero loops.
+        # This is incredibly brutal for AI. We punch a few random holes in the walls 
+        # to create loops and shortcuts so they don't get completely trapped in dead ends.
+        for _ in range(15):
+            rx = random.randint(2, MAX_X - 2)
+            ry = random.randint(2, MAX_Y - 2)
+            walls.discard((rx, ry))
+    
+    elif layout == "dungeon":
+        # 1. Fill the map with solid stone
+        for x in range(1, MAX_X):
+            for y in range(1, MAX_Y):
+                walls.add((x, y))
+
+        rooms = []
+        
+        # 2. Force the first room to be exactly where the player spawns
+        px, py = PLAYER_START
+        rooms.append((px - 1, py - 1, 3, 3)) # 3x3 starting room
+        
+        # 3. Generate a few random rooms
+        num_rooms = random.randint(4, 6)
+        for _ in range(num_rooms):
+            w = random.randint(3, 6) # Width between 3 and 6 tiles
+            h = random.randint(3, 6) # Height between 3 and 6 tiles
+            x = random.randint(1, MAX_X - w)
+            y = random.randint(1, MAX_Y - h)
+            rooms.append((x, y, w, h))
+
+        # 4. Carve out all the rooms by removing those walls
+        for (rx, ry, rw, rh) in rooms:
+            for x in range(rx, rx + rw):
+                for y in range(ry, ry + rh):
+                    walls.discard((x, y))
+                    
+        # 5. Connect the rooms with 1-tile wide L-shaped corridors
+        for i in range(1, len(rooms)):
+            prev_x, prev_y, pw, ph = rooms[i - 1]
+            curr_x, curr_y, cw, ch = rooms[i]
+            
+            # Find the center of the previous room and the current room
+            p_center_x, p_center_y = prev_x + pw // 2, prev_y + ph // 2
+            c_center_x, c_center_y = curr_x + cw // 2, curr_y + ch // 2
+            
+            # Flip a coin to decide if we dig horizontal-then-vertical, or vice versa
+            if random.choice([True, False]):
+                # Horizontal dig
+                for x in range(min(p_center_x, c_center_x), max(p_center_x, c_center_x) + 1):
+                    walls.discard((x, p_center_y))
+                # Vertical dig
+                for y in range(min(p_center_y, c_center_y), max(p_center_y, c_center_y) + 1):
+                    walls.discard((c_center_x, y))
+            else:
+                # Vertical dig
+                for y in range(min(p_center_y, c_center_y), max(p_center_y, c_center_y) + 1):
+                    walls.discard((p_center_x, y))
+                # Horizontal dig
+                for x in range(min(p_center_x, c_center_x), max(p_center_x, c_center_x) + 1):
+                    walls.discard((x, c_center_y))
+                
+    return list(walls)
+
 # Max moves we allow between food
-LIFE_FORCE = 40
-MAX_ITERATIONS = 1000
+LIFE_FORCE = 50
+MAX_ITERATIONS = 5000
 
 #
 # Genetic Algo Defaults
 #
 GENERATIONS = 50
-POP_SIZE = 1000
+POP_SIZE = 500
 MUTATION_RATE = 0.075
 
 #
@@ -162,7 +315,8 @@ class World:
                  max_x=MAX_X, 
                  max_y=MAX_Y, 
                  player_start=PLAYER_START, 
-                 initial_food=generate_initial_food(),
+                 initial_food=None,
+                 initial_walls=None,
                  facing=NORTH
                  ):
         self.state_dict = {}
@@ -174,6 +328,14 @@ class World:
         self.MAX_Y = max_y
 
         self.state_dict[self.player_loc] = PLAYER_CHAR
+
+        # --- Add the walls to the map ---
+        if initial_walls:
+            for wall in initial_walls:
+                self.state_dict[wall] = WALL_CHAR
+
+        if initial_food is None:
+            initial_food = generate_initial_food(walls=initial_walls)
 
         for food in initial_food:
             self.state_dict[food] = FOOD_CHAR
@@ -312,6 +474,10 @@ class World:
         target_content = self.state_dict.get(target_loc, EMPTY_CHAR)
         result = None
         
+        # --- Stop the move if it's a wall ---
+        if target_content == WALL_CHAR:
+            return None 
+            
         if target_content == FOOD_CHAR:
             result = "food"
             # Track the score and spawn a new piece of food
@@ -622,20 +788,24 @@ class NumpyNeuralNet:
 
     def forward(self, inputs):
         """Passes the vision data through the network using Vectorized math."""
-        # Convert the standard python list of 16 inputs into a fast NumPy array
+        # Convert the standard python list of inputs into a fast NumPy array
         x = np.array(inputs)
         
-        # 1. Hidden Layer Math: Z = W * X + b (Calculated instantly using dot product)
+        # 1. Hidden Layer Math: Z = W * X + b
         z1 = np.dot(self.W1, x) + self.b1
         
-        # ReLU Activation Function (np.maximum instantly converts all negative numbers to 0)
+        # ReLU Activation Function (converts negative numbers to 0)
         a1 = np.maximum(0, z1)
 
         # 2. Output Layer Math
         z2 = np.dot(self.W2, a1) + self.b2
 
-        # Convert back to a standard Python list so the rest of your bug code understands it
-        return z2.tolist()
+        # --- THE FIX: THE SQUISH ---
+        # Apply Tanh to prevent the memory outputs from exploding to Infinity!
+        a2 = np.tanh(z2)
+
+        # Convert back to a standard Python list
+        return a2.tolist()
 
     def mutate(self, rate=0.05):
         """Creates a slightly altered copy of this brain for offspring."""
@@ -684,9 +854,9 @@ class NeuralBug(BaseBug):
             "back_left", "back_right", "back"
         ]
         
-        # 16 Inputs (8 food, 8 walls), 12 Hidden Neurons, 8 Outputs (Movement choices)
+        # 17 Inputs (8 food, 8 walls, 1 life force), 12 Hidden Neurons, 8 Outputs (Movement choices)
         if brain is None:
-            self.brain = NumpyNeuralNet(input_size=16, hidden_size=12, output_size=8)
+            self.brain = NumpyNeuralNet(input_size=17, hidden_size=12, output_size=8)
         else:
             self.brain = brain
 
@@ -713,17 +883,24 @@ class NeuralBug(BaseBug):
                     
             food_inputs.append(food_score)
             wall_inputs.append(wall_score)
-            
+        # If the simulation hasn't started yet, default to 1.0 (full)
+        current_life = getattr(self, 'life_force', 100)
+        max_life = getattr(self, 'max_life_force', 100)
+        normalized_hunger = current_life / max_life
+
         # Combine them into a single list of 16 numbers
-        inputs = food_inputs + wall_inputs
+        inputs = food_inputs + wall_inputs + [normalized_hunger]
 
         # --- THINK ---
-        # Pass the 16 inputs into the neural network to get 8 output scores
+        # Pass the inputs into the neural network to get 8 output scores
         output_scores = self.brain.forward(inputs)
 
         # --- ACT ---
         # Find the index of the highest score, and return that direction
         best_index = output_scores.index(max(output_scores))
+
+        # --- STORE ---
+        self.last_action_scores = output_scores
 
         return self.directions[best_index]
 
@@ -803,6 +980,166 @@ class NeuralBug(BaseBug):
         )
 
 
+class MemoryBug(BaseBug):
+    """
+    A NeuralBug with a recurrent "scratchpad". It passes its previous thoughts 
+    back into its own brain on the next turn.
+    """
+    def __init__(self, vision_cone, brain=None, memory_size=4):
+        super().__init__(vision_cone)
+        
+        self.directions = [
+            "forward", "forward_left", "forward_right", 
+            "left", "right", 
+            "back_left", "back_right", "back"
+        ]
+        
+        self.memory_size = memory_size
+        
+        # The bug starts with a blank memory (all zeros)
+        self.memory = np.zeros(self.memory_size)
+        
+        if brain is None:
+            # 16 vision + 1 life force + 4 memory = 20 Inputs
+            # 8 movements + 4 memory = 12 Outputs
+            self.brain = NumpyNeuralNet(
+                input_size=17 + self.memory_size, 
+                hidden_size=20, 
+                output_size=8 + self.memory_size
+            )
+        else:
+            self.brain = brain
+
+    def reset_memory(self):
+        """Called by the Simulation before the first turn."""
+        self.memory = np.zeros(self.memory_size)
+
+    def request_action(self, perception):
+        # 1. Build the vision inputs (16 numbers) just like before
+        food_inputs = []
+        wall_inputs = []
+        
+        for direction in self.directions:
+            view = perception.get(direction, [])
+            food_score = 0.0
+            wall_score = 0.0
+            
+            for distance_index, tile in enumerate(view):
+                distance = distance_index + 1 
+                
+                if tile == FOOD_CHAR and food_score == 0:
+                    food_score = 1.0 / distance 
+                elif tile == WALL_CHAR and distance == 1:
+                    wall_score = 1.0 
+                    break
+                    
+            food_inputs.append(food_score)
+            wall_inputs.append(wall_score)
+            
+        vision_inputs = food_inputs + wall_inputs
+
+        # 2. Combine Inputs
+        # Convert our NumPy memory array to a list and stitch them together
+        current_life = getattr(self, 'life_force', 100)
+        max_life = getattr(self, 'max_life_force', 100)
+        normalized_hunger = current_life / max_life
+        
+        vision_inputs = food_inputs + wall_inputs + [normalized_hunger]
+
+        # Combine Vision (17) + Memory (4) = 21 numbers total
+        full_inputs = vision_inputs + self.memory.tolist()
+
+        # --- THINK ---
+        outputs = self.brain.forward(full_inputs)
+
+        # 4. SPLIT THE OUTPUTS
+        # The first 8 numbers are our movement choices
+        action_scores = outputs[:8]
+        
+        # The remaining numbers are our new memories to save for next turn
+        new_memory = outputs[8:]
+        self.memory = np.array(new_memory)
+
+        # 5. ACT
+        best_index = action_scores.index(max(action_scores))
+
+        # 6: STORE
+        self.last_vision = vision_inputs
+        self.last_action_scores = action_scores
+
+        return self.directions[best_index]
+
+    def spawn_child(self, mutation_rate, other_parent=None):
+        """Returns a brand new MemoryBug with a mixed and mutated brain. We ignore other_parent but keep it for API"""
+        # something with mixing parents is borked. 
+        # if other_parent is not None:
+        #     mixed_brain = self.brain.crossover(other_parent.brain)
+        # else:
+        #     mixed_brain = NumpyNeuralNet(
+        #         self.brain.input_size, self.brain.hidden_size, self.brain.output_size,
+        #         (self.brain.W1.copy(), self.brain.b1.copy(), self.brain.W2.copy(), self.brain.b2.copy())
+        #     )
+            
+        mutated_brain = self.brain.mutate(mutation_rate)
+        
+        return MemoryBug(
+            vision_cone=self.vision_cone, 
+            brain=mutated_brain, 
+            memory_size=self.memory_size
+        )
+    
+    def save_to_file(self, filename):
+        """Saves the bug's vision cone, memory size, and weights to a JSON file."""
+        data = {
+            "bug_type": "MemoryBug",
+            "vision_cone": self.vision_cone,
+            "memory_size": self.memory_size,
+            "brain": {
+                "input_size": self.brain.input_size,
+                "hidden_size": self.brain.hidden_size,
+                "output_size": self.brain.output_size,
+                "weights": [
+                    self.brain.W1.tolist(), 
+                    self.brain.b1.tolist(), 
+                    self.brain.W2.tolist(), 
+                    self.brain.b2.tolist()
+                ]
+            }
+        }
+
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        Log.info(f"MemoryBug saved successfully to {filename}")
+
+    @classmethod
+    def load_from_file(cls, filename):
+        """Loads a JSON file and returns a fully reconstructed MemoryBug."""
+        with open(filename, 'r') as f:
+            data = json.load(f)
+            
+        brain_data = data["brain"]
+        saved_weights = brain_data["weights"]
+        
+        numpy_weights = (
+            np.array(saved_weights[0]), 
+            np.array(saved_weights[1]), 
+            np.array(saved_weights[2]), 
+            np.array(saved_weights[3])  
+        )
+        
+        reconstructed_brain = NumpyNeuralNet(
+            input_size=brain_data["input_size"],
+            hidden_size=brain_data["hidden_size"],
+            output_size=brain_data["output_size"],
+            weights=numpy_weights
+        )
+        
+        return cls(
+            vision_cone=data["vision_cone"], 
+            brain=reconstructed_brain,
+            memory_size=data.get("memory_size", 4)
+        )
+
 class Simulation:
     def __init__(self, world, bug, max_iterations=MAX_ITERATIONS, life_force=LIFE_FORCE):
         self.world = world
@@ -812,11 +1149,17 @@ class Simulation:
         
     def run(self):
         """Runs the bug through the world until it starves or hits the iteration limit."""
-        until_we_die = self.life_force
-        turns_survived = 0
+        self.bug.max_life_force = self.life_force
+        self.bug.life_force = self.life_force
+
+        # Reset the bug's memory before we run this simulation
+        if hasattr(self.bug, 'reset_memory'):
+            self.bug.reset_memory()
         
+        turns_survived = 0
+
         for turn in range(self.max_iterations):
-            until_we_die -= 1
+            self.bug.life_force -= 1
             turns_survived += 1
             
             # 1. Look
@@ -828,13 +1171,13 @@ class Simulation:
             # 3. Act
             move_result = self.world.move_relative(next_action)
             
-            # 4. React
+            # 4. React (Restore the bug's life force if it eats)
             if move_result == "food":
-                until_we_die = self.life_force
+                self.bug.life_force = self.bug.max_life_force
         
             # 5. Check Survival
-            if until_we_die <= 0:
-                break 
+            if self.bug.life_force <= 0:
+                break
                 
         # Return standard metrics so the trainer knows what happened
         food_collected = getattr(self.world, 'food_collected', 0)
@@ -842,22 +1185,23 @@ class Simulation:
         return {
             "turns_survived": turns_survived,
             "food_collected": food_collected,
-            "starved": until_we_die <= 0
+            "starved": self.bug.life_force <= 0
         }
 
 #
 # Brokwn out so that we can run in multiprocessing
 #
 def evaluate_single_bug_worker(args):
-    """
-    Top-level worker function for multiprocessing. 
-    Runs the simulation trials for a single bug and returns the average fitness score.
-    """
-    bug, trials, fitness_fn, result_goal = args
+    # --- Accept map_layout ---
+    bug, trials, fitness_fn, result_goal, map_layout = args
     total_fitness = 0
     
     for _ in range(trials):
-        world = World(initial_food=generate_initial_food())
+        # --- Generate the map state sequentially ---
+        walls = generate_walls(map_layout)
+        food = generate_initial_food(walls=walls)
+        world = World(initial_food=food, initial_walls=walls)
+        
         sim = Simulation(world, bug)
         results = sim.run()
         
@@ -875,7 +1219,8 @@ class EvolutionaryTrainer:
                  population_size=POP_SIZE, 
                  mutation_rate=MUTATION_RATE, 
                  trials=1,
-                 simulation_result_goal="turns_survived"):
+                 simulation_result_goal="turns_survived",
+                 map_layout="empty"):
         
         self.bug_class = bug_class
         self.vision_cone = vision_cone
@@ -885,6 +1230,7 @@ class EvolutionaryTrainer:
         self.mutation_rate = mutation_rate
         self.trials = trials
         self.simulation_result_goal = simulation_result_goal
+        self.map_layout = map_layout
         
         self.overall_best_score = -9999999 
 
@@ -904,7 +1250,7 @@ class EvolutionaryTrainer:
             
             # Pack up the arguments each CPU core needs into a tuple
             worker_args = [
-                (bug, self.trials, self.fitness_fn, self.simulation_result_goal)
+                (bug, self.trials, self.fitness_fn, self.simulation_result_goal, self.map_layout)
                 for bug in population
             ]
             
@@ -1070,70 +1416,32 @@ def basic_bugs():
     print("=====================================================================\n")
 
 if __name__ == "__main__":
-    #
-    # Basic Bugs as a base line
-    #
-    basic_bugs()
-    
-    # Test of a basic BrainBug focused purely on eating
-    brain_trainer = EvolutionaryTrainer(
-        bug_class=BrainBug,
-        vision_cone=VISION_CONES["Balanced"],
-        fitness_fn=fitness_gluttony,
-        generations=GENERATIONS,
-        population_size=POP_SIZE,
-        mutation_rate=MUTATION_RATE,
-        trials=3
-    )
-
-    best_brain_bug = brain_trainer.train()
-
-    best_brain_bug.save_to_file('best-brain-bug-crossover.json')
-
-    # Deep evolution of a NeuralBug maximizing efficiency
-    neural_trainer = EvolutionaryTrainer(
+    # basic_bugs()
+    reactive_trainer = EvolutionaryTrainer(
         bug_class=NeuralBug,
         vision_cone=VISION_CONES["Radar"],
-        fitness_fn=fitness_efficiency,
+        fitness_fn=fitness_longevity,
         generations=GENERATIONS,
         population_size=POP_SIZE,
         mutation_rate=MUTATION_RATE,
+        map_layout="maze",
         trials=3
     )
 
-    best_neural_bug = neural_trainer.train()
-
-    best_neural_bug.save_to_file('best-neural-bug-crossover.json')
-
-    print("\n--- TESTING APEX BUG RECOVERY ---")
-
-    try:
-        # 1. Test the BrainBug
-        print("Loading BrainBug...")
-        resurrected_brain_bug = BrainBug.load_from_file('best-brain-bug-crossover.json')
-        
-        # Prove it works by running a simulation
-        brain_world = World(initial_food=generate_initial_food())
-        brain_sim = Simulation(brain_world, resurrected_brain_bug)
-        brain_results = brain_sim.run()
-        
-        print(f"BrainBug successfully loaded and simulated!")
-        print(f"   Score: Survived {brain_results['turns_survived']} turns, Ate {brain_results['food_collected']} food.\n")
+    best_reactive_bug = reactive_trainer.train()
+    best_reactive_bug.save_to_file('best-reactive-bug-crossover-utrap-longevity.json')
 
 
-        # 2. Test the NeuralBug
-        print("Loading NeuralBug...")
-        resurrected_neural_bug = NeuralBug.load_from_file('best-neural-bug-crossover.json')
-        
-        # Prove the NumPy arrays rebuilt correctly by running a simulation
-        neural_world = World(initial_food=generate_initial_food())
-        neural_sim = Simulation(neural_world, resurrected_neural_bug)
-        neural_results = neural_sim.run()
-        
-        print(f"NeuralBug successfully loaded and simulated!")
-        print(f"   Score: Survived {neural_results['turns_survived']} turns, Ate {neural_results['food_collected']} food.\n")
+    memory_trainer = EvolutionaryTrainer(
+        bug_class=MemoryBug,
+        vision_cone=VISION_CONES["Radar"],
+        fitness_fn=fitness_longevity,
+        generations=GENERATIONS,
+        population_size=POP_SIZE,
+        mutation_rate=MUTATION_RATE,
+        map_layout="maze",
+        trials=3
+    )
 
-    except FileNotFoundError:
-        print(" Error: JSON files not found. Make sure you run the training loop at least once to generate them!")
-    except Exception as e:
-        print(f" Error during loading or simulation: {e}")
+    best_memory_bug = memory_trainer.train()
+    best_memory_bug.save_to_file('best-neural-bug-crossover-utrap-longevity.json')
