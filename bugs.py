@@ -372,12 +372,31 @@ class World:
             target_x = p_x + (dx * step)
             target_y = p_y + (dy * step)
             
-            if target_x == 0 or target_x == MAX_X or target_y == 0 or target_y == MAX_Y:
+            # 1. Check World Bounds
+            if target_x <= 0 or target_x >= MAX_X or target_y <= 0 or target_y >= MAX_Y:
                 results.append(WALL_CHAR)
-            elif not (0 <= target_x <= MAX_X and 0 <= target_y <= MAX_Y):
-                results.append(VOID_CHAR)
+                break # Blocked by map edge
+            
+            # 2. Check for solid wall at destination
+            target_tile = self.state_dict.get((target_x, target_y), EMPTY_CHAR)
+            
+            # --- Corner-Cutting Vision Check ---
+            # If moving diagonally, check if we are "squeezing" through a blocked corner
+            if abs(dx) == 1 and abs(dy) == 1:
+                side_a = self.state_dict.get((p_x + (dx * step), p_y + (dy * (step - 1))), EMPTY_CHAR)
+                side_b = self.state_dict.get((p_x + (dx * (step - 1)), p_y + (dy * step)), EMPTY_CHAR)
+                
+                # If both tiles beside the diagonal path are walls, the corner is solid
+                if side_a == WALL_CHAR and side_b == WALL_CHAR:
+                    results.append(WALL_CHAR)
+                    break 
+
+            # 3. Standard wall collision
+            if target_tile == WALL_CHAR:
+                results.append(WALL_CHAR)
+                break # Blocked by wall
             else:
-                results.append(self.state_dict.get((target_x, target_y), EMPTY_CHAR))
+                results.append(target_tile)
                 
         return results
     
@@ -395,10 +414,18 @@ class World:
         right_dx, right_dy     = -fy, fx
 
         # 2. Diagonal Vectors 
-        fl_dx, fl_dy = forward_dx + left_dx, forward_dy + left_dy
-        fr_dx, fr_dy = forward_dx + right_dx, forward_dy + right_dy
-        bl_dx, bl_dy = back_dx + left_dx, back_dy + left_dy
-        br_dx, br_dy = back_dx + right_dx, back_dy + right_dy
+        # --- Clamp the diagonals so the raycasts don't leap over tiles ---
+        fl_dx = max(-1, min(1, forward_dx + left_dx))
+        fl_dy = max(-1, min(1, forward_dy + left_dy))
+        
+        fr_dx = max(-1, min(1, forward_dx + right_dx))
+        fr_dy = max(-1, min(1, forward_dy + right_dy))
+        
+        bl_dx = max(-1, min(1, back_dx + left_dx))
+        bl_dy = max(-1, min(1, back_dy + left_dy))
+        
+        br_dx = max(-1, min(1, back_dx + right_dx))
+        br_dy = max(-1, min(1, back_dy + right_dy))
 
         # 3. Raycast for all 8 directions
         return { 
@@ -474,10 +501,21 @@ class World:
         target_content = self.state_dict.get(target_loc, EMPTY_CHAR)
         result = None
         
-        # --- Stop the move if it's a wall ---
+        # --- Stop the move if the destination itself is a wall ---
         if target_content == WALL_CHAR:
             return None 
+
+        # --- Corner-Cutting Prevention ---
+        # If moving diagonally, check the two adjacent cardinal tiles it is sliding past
+        if abs(dx) == 1 and abs(dy) == 1:
+            tile_x = self.state_dict.get((p_x + dx, p_y), EMPTY_CHAR)
+            tile_y = self.state_dict.get((p_x, p_y + dy), EMPTY_CHAR)
             
+            # If either adjacent tile is a wall, the bug cannot squeeze past the corner
+            if tile_x == WALL_CHAR or tile_y == WALL_CHAR:
+                return None
+            
+        # --- Check for food ---
         if target_content == FOOD_CHAR:
             result = "food"
             # Track the score and spawn a new piece of food
@@ -818,19 +856,23 @@ class NumpyNeuralNet:
         return NumpyNeuralNet(self.input_size, self.hidden_size, self.output_size, (new_W1, new_b1, new_W2, new_b2))
     
     def crossover(self, other_parent_brain):
-        """Merges this brain with another brain by flipping a coin for each weight."""
-        # 1. Create a 50/50 true/false mask for every matrix
-        # If true, take from self. If false, take from other_parent.
-        mask_W1 = np.random.rand(*self.W1.shape) > 0.5
-        mask_b1 = np.random.rand(*self.b1.shape) > 0.5
-        mask_W2 = np.random.rand(*self.W2.shape) > 0.5
-        mask_b2 = np.random.rand(*self.b2.shape) > 0.5
-
-        # 2. Weave the matrices together
-        child_W1 = np.where(mask_W1, self.W1, other_parent_brain.W1)
-        child_b1 = np.where(mask_b1, self.b1, other_parent_brain.b1)
-        child_W2 = np.where(mask_W2, self.W2, other_parent_brain.W2)
-        child_b2 = np.where(mask_b2, self.b2, other_parent_brain.b2)
+        """Merges this brain with another by flipping a coin for each NEURON (Row-wise)."""
+        
+        # 1. Flip a coin for each Hidden Neuron
+        # We create a mask of shape (hidden_size, 1) so it broadcasts across the entire row
+        mask_hidden = np.random.rand(self.hidden_size, 1) > 0.5
+        
+        # Weave W1 (The entire row is taken from self or other_parent)
+        child_W1 = np.where(mask_hidden, self.W1, other_parent_brain.W1)
+        # Flatten the mask for the 1D bias array
+        child_b1 = np.where(mask_hidden.flatten(), self.b1, other_parent_brain.b1)
+        
+        # 2. Flip a coin for each Output Neuron
+        mask_output = np.random.rand(self.output_size, 1) > 0.5
+        
+        # Weave W2
+        child_W2 = np.where(mask_output, self.W2, other_parent_brain.W2)
+        child_b2 = np.where(mask_output.flatten(), self.b2, other_parent_brain.b2)
 
         # 3. Return a completely new brain
         return NumpyNeuralNet(
@@ -901,6 +943,7 @@ class NeuralBug(BaseBug):
 
         # --- STORE ---
         self.last_action_scores = output_scores
+        self.last_perception = perception
 
         return self.directions[best_index]
 
@@ -1066,21 +1109,21 @@ class MemoryBug(BaseBug):
         # 6: STORE
         self.last_vision = vision_inputs
         self.last_action_scores = action_scores
-
+        self.last_perception = perception
+        
         return self.directions[best_index]
 
     def spawn_child(self, mutation_rate, other_parent=None):
         """Returns a brand new MemoryBug with a mixed and mutated brain. We ignore other_parent but keep it for API"""
-        # something with mixing parents is borked. 
-        # if other_parent is not None:
-        #     mixed_brain = self.brain.crossover(other_parent.brain)
-        # else:
-        #     mixed_brain = NumpyNeuralNet(
-        #         self.brain.input_size, self.brain.hidden_size, self.brain.output_size,
-        #         (self.brain.W1.copy(), self.brain.b1.copy(), self.brain.W2.copy(), self.brain.b2.copy())
-        #     )
+        if other_parent is not None:
+            mixed_brain = self.brain.crossover(other_parent.brain)
+        else:
+            mixed_brain = NumpyNeuralNet(
+                self.brain.input_size, self.brain.hidden_size, self.brain.output_size,
+                (self.brain.W1.copy(), self.brain.b1.copy(), self.brain.W2.copy(), self.brain.b2.copy())
+            )
             
-        mutated_brain = self.brain.mutate(mutation_rate)
+        mutated_brain = mixed_brain.mutate(mutation_rate)
         
         return MemoryBug(
             vision_cone=self.vision_cone, 
@@ -1420,7 +1463,7 @@ if __name__ == "__main__":
     reactive_trainer = EvolutionaryTrainer(
         bug_class=NeuralBug,
         vision_cone=VISION_CONES["Radar"],
-        fitness_fn=fitness_longevity,
+        fitness_fn=fitness_gluttony,
         generations=GENERATIONS,
         population_size=POP_SIZE,
         mutation_rate=MUTATION_RATE,
@@ -1429,13 +1472,13 @@ if __name__ == "__main__":
     )
 
     best_reactive_bug = reactive_trainer.train()
-    best_reactive_bug.save_to_file('best-reactive-bug-crossover-utrap-longevity.json')
+    best_reactive_bug.save_to_file('best-neural-bug-crossover-maze-gluttony.json')
 
 
     memory_trainer = EvolutionaryTrainer(
         bug_class=MemoryBug,
         vision_cone=VISION_CONES["Radar"],
-        fitness_fn=fitness_longevity,
+        fitness_fn=fitness_gluttony,
         generations=GENERATIONS,
         population_size=POP_SIZE,
         mutation_rate=MUTATION_RATE,
@@ -1444,4 +1487,4 @@ if __name__ == "__main__":
     )
 
     best_memory_bug = memory_trainer.train()
-    best_memory_bug.save_to_file('best-neural-bug-crossover-utrap-longevity.json')
+    best_memory_bug.save_to_file('best-memory-bug-crossover-maze-gluttony.json')
