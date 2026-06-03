@@ -20,3 +20,16 @@ The world will have empty space, the `bug`, and `food` randomly thrown through
 ### Goal
 
 The goal is to survive/continually eat food for the longest iterations.
+
+### Running
+
+You can run the different trials via `bugs.py`:
+
+```python
+if __name__ == "__main__":
+    basic_bugs() # tests basic bugs to get a baseline
+    train_genetic_algorithm() # tests genetic algorithm
+    train_neural_algorithm() # tests a basic single neural net
+    train_neural_algorithm_with_trials() # tests neural net with many trials
+    train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_efficiency) # tests neural net with many trials and a custom fitness function
+```

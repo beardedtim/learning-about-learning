@@ -101,7 +101,7 @@ def generate_initial_food(num_items=DEFAULT_INITIAL_FOOD_COUNT):
 
 # Max moves we allow between food
 LIFE_FORCE = 40
-MAX_ITERATIONS = 500
+MAX_ITERATIONS = 50000
 
 #
 # Genetic Algo Defaults
@@ -307,7 +307,7 @@ class World:
         
         if target_content == FOOD_CHAR:
             result = "food"
-            # NEW: Track the score and spawn a new piece of food!
+            # Track the score and spawn a new piece of food
             if not hasattr(self, 'food_collected'): 
                 self.food_collected = 0
             self.food_collected += 1
@@ -429,6 +429,11 @@ class ForwardBug(BaseBug):
         return "back"
 
 class BrainBug(BaseBug):
+    """
+    A Brain Bug has _simple_ input -> action brain. It can be modified
+    with Rules based on those inputs but isn't allowed to do get much
+    more complex than that
+    """
     def __init__(self, vision_cone, genes=None):
         super().__init__(vision_cone)
         
@@ -494,6 +499,157 @@ class BrainBug(BaseBug):
             new_genes[gene_name] = weight + tweak
             
         return new_genes
+
+class NeuralNet:
+    def __init__(self, input_size, hidden_size, output_size, weights=None):
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+
+        # If no weights are provided, generate a completely random brain
+        if weights is None:
+            # W1: Weights from Input to Hidden Layer
+            self.W1 = [[random.uniform(-1, 1) for _ in range(input_size)] for _ in range(hidden_size)]
+            self.b1 = [random.uniform(-1, 1) for _ in range(hidden_size)]
+            
+            # W2: Weights from Hidden to Output Layer
+            self.W2 = [[random.uniform(-1, 1) for _ in range(hidden_size)] for _ in range(output_size)]
+            self.b2 = [random.uniform(-1, 1) for _ in range(output_size)]
+        else:
+            self.W1, self.b1, self.W2, self.b2 = weights
+
+    def forward(self, inputs):
+        """Passes the vision data through the network to get movement scores."""
+        
+        # 1. Hidden Layer Math: Z = W * X + b
+        hidden = []
+        for i in range(self.hidden_size):
+            activation = self.b1[i]
+            for j in range(self.input_size):
+                activation += inputs[j] * self.W1[i][j]
+                
+            # ReLU Activation Function (converts negative numbers to 0)
+            hidden.append(max(0.0, activation))
+
+        # 2. Output Layer Math
+        outputs = []
+        for i in range(self.output_size):
+            activation = self.b2[i]
+            for j in range(self.hidden_size):
+                activation += hidden[j] * self.W2[i][j]
+            outputs.append(activation) 
+
+        return outputs
+
+    def mutate(self, rate=0.05):
+        """Creates a slightly altered copy of this brain for offspring."""
+        def mutate_matrix(mat):
+            return [[w + random.uniform(-rate, rate) for w in row] for row in mat]
+        def mutate_vector(vec):
+            return [v + random.uniform(-rate, rate) for v in vec]
+
+        new_W1 = mutate_matrix(self.W1)
+        new_b1 = mutate_vector(self.b1)
+        new_W2 = mutate_matrix(self.W2)
+        new_b2 = mutate_vector(self.b2)
+        
+        return NeuralNet(self.input_size, self.hidden_size, self.output_size, (new_W1, new_b1, new_W2, new_b2))
+
+class NeuralBug(BaseBug):
+    """
+    The NeuralBug is allowed to have an actual network of neurons, not just
+    some hardcoded heuristics.
+    """
+    def __init__(self, vision_cone, brain=None):
+        super().__init__(vision_cone)
+        
+        # The Directions array MUST stay in this exact order so the brain 
+        # understands which input/output index matches which direction.
+        self.directions = [
+            "forward", "forward_left", "forward_right", 
+            "left", "right", 
+            "back_left", "back_right", "back"
+        ]
+        
+        # 16 Inputs (8 food, 8 walls), 12 Hidden Neurons, 8 Outputs (Movement choices)
+        if brain is None:
+            self.brain = NeuralNet(input_size=16, hidden_size=12, output_size=8)
+        else:
+            self.brain = brain
+
+    def request_action(self, perception):
+        inputs = []
+        
+        # --- BUILD THE INPUT VECTOR (16 numbers) ---
+        food_inputs = []
+        wall_inputs = []
+        
+        for direction in self.directions:
+            view = perception.get(direction, [])
+            food_score = 0.0
+            wall_score = 0.0
+            
+            for distance_index, tile in enumerate(view):
+                distance = distance_index + 1 
+                
+                if tile == FOOD_CHAR and food_score == 0:
+                    food_score = 1.0 / distance # Closer food = higher score
+                elif tile == WALL_CHAR and distance == 1:
+                    wall_score = 1.0 # 1.0 means a wall is touching us
+                    break
+                    
+            food_inputs.append(food_score)
+            wall_inputs.append(wall_score)
+            
+        # Combine them into a single list of 16 numbers
+        inputs = food_inputs + wall_inputs
+
+        # --- THINK ---
+        # Pass the 16 inputs into the neural network to get 8 output scores
+        output_scores = self.brain.forward(inputs)
+
+        # --- ACT ---
+        # Find the index of the highest score, and return that direction
+        best_index = output_scores.index(max(output_scores))
+
+        return self.directions[best_index]
+
+    def mutate(self, mutation_rate=0.05):
+        # Mutate the neural network and pass it into a new child bug
+        mutated_brain = self.brain.mutate(rate=mutation_rate)
+
+        return mutated_brain
+
+
+#
+# Fitness Functions
+#
+# What does it mean to "win"?
+#
+
+def fitness_gluttony(world, turns_survived):
+    """
+    The 'Yo, food is good' mindset.
+    Ignores how many turns it took, solely rewards the amount of food eaten.
+    """
+    return float(getattr(world, 'food_collected', 0))
+
+def fitness_longevity(world, turns_survived):
+    """
+    The survivalist mindset.
+    Rewards staying alive as long as possible. Food is only a means to an end.
+    """
+    return float(turns_survived)
+
+def fitness_efficiency(world, turns_survived):
+    """
+    A hybrid mindset.
+    Rewards eating food, but PENALIZES taking too long to do it. 
+    """
+    food = getattr(world, 'food_collected', 0)
+    # 50 points per food, minus 1 point for every turn wasted
+    return (food * 50.0) - turns_survived
+
 
 def basic_bugs():
     # Build a list of tuples: (BugClass, ConeName, ConeDictionary)
@@ -659,6 +815,287 @@ def train_genetic_algorithm(generations=GENERATIONS, population_size=POP_SIZE, m
     
     return best_bug
 
+def train_neural_algorithm(generations=GENERATIONS, population_size=POP_SIZE, mutation_rate=MUTATION_RATE):
+    Log.info("--- STARTING NEURAL EVOLUTION ---")
+    Log.info(f"Generations: {generations} | Population: {population_size} | Mutation Rate: {mutation_rate}\n")
+    
+    training_cone = VISION_CONES["Radar"]
+    
+    # FIX 1: Initialize with NeuralBug instead of BrainBug
+    population = [NeuralBug(vision_cone=training_cone) for _ in range(population_size)]
+    
+    # Track the best score across ALL generations to log breakthroughs
+    overall_best_score = -1
+    
+    for gen in range(generations):
+        starting_food = generate_initial_food()
+        
+        for bug in population:
+            world = World(initial_food=starting_food)
+            until_we_die = LIFE_FORCE
+            
+            for turn in range(MAX_ITERATIONS):
+                until_we_die -= 1
+                
+                perception = world.get_perception(**bug.vision_cone)
+                next_action = bug.request_action(perception=perception)
+                move_result = world.move_relative(next_action)
+                
+                if move_result == "food":
+                    until_we_die = LIFE_FORCE
+            
+                if until_we_die <= 0:
+                    break 
+                    
+            bug.fitness = getattr(world, 'food_collected', 0)
+
+        population.sort(key=lambda b: getattr(b, 'fitness', 0), reverse=True)
+        
+        top_score = population[0].fitness
+        avg_score = sum(b.fitness for b in population) / population_size
+        
+        # Standard generation heartbeat log
+        print(f"Gen {gen + 1:03d} | Top Food: {top_score:<4} | Avg Food: {avg_score:.2f}")
+
+        # Announce when the AI breaks a new ceiling
+        if top_score > overall_best_score:
+            overall_best_score = top_score
+            Log.debug(f"New Apex Bug evolved in Gen %s with a score of %s!", gen + 1, top_score)
+
+        # 4. Selection and Mutation
+        num_parents = max(2, population_size // 10)
+        parents = population[:num_parents]
+        
+        next_generation = []
+        next_generation.extend(parents)
+        
+        while len(next_generation) < population_size:
+            parent = random.choice(parents)
+            
+            child_brain = parent.mutate(mutation_rate=mutation_rate)
+            child_bug = NeuralBug(vision_cone=training_cone, brain=child_brain)
+            next_generation.append(child_bug)
+            
+        population = next_generation
+
+    Log.info("\n--- NEURAL EVOLUTION COMPLETE ---")
+    best_bug = population[0]
+    Log.info(f"Final Apex Bug reached a top score of {best_bug.fitness}")
+    
+    return best_bug
+
+
+def train_neural_algorithm_with_trials(generations=GENERATIONS, population_size=POP_SIZE, mutation_rate=MUTATION_RATE, trials=3):
+    Log.info("--- STARTING MULTI-TRIAL NEURAL EVOLUTION ---")
+    Log.info(f"Generations: {generations} | Population: {population_size} | Trials per Bug: {trials} | Mutation Rate: {mutation_rate}\n")
+    
+    # We will use the 'Radar' vision cone for this test so they have 360 awareness
+    training_cone = VISION_CONES["Radar"]
+    
+    # 1. Initialize the first generation with completely random brains
+    population = [NeuralBug(vision_cone=training_cone) for _ in range(population_size)]
+    
+    # Track the best score across ALL generations to log breakthroughs
+    overall_best_score = -1
+    
+    for gen in range(generations):
+        
+        # 2. Evaluate Fitness (Run the multi-trial tournament for every bug)
+        for bug in population:
+            total_score_across_trials = 0
+            
+            # --- THE MULTI-TRIAL LOOP ---
+            for _ in range(trials):
+                # Generate a fresh map for this specific trial
+                starting_food = generate_initial_food()
+                world = World(initial_food=starting_food)
+                until_we_die = LIFE_FORCE
+                
+                for turn in range(MAX_ITERATIONS):
+                    until_we_die -= 1
+                    
+                    perception = world.get_perception(**bug.vision_cone)
+                    next_action = bug.request_action(perception=perception)
+                    move_result = world.move_relative(next_action)
+                    
+                    if move_result == "food":
+                        until_we_die = LIFE_FORCE
+                
+                    if until_we_die <= 0:
+                        break 
+                        
+                # Add this trial's score to the running total
+                total_score_across_trials += getattr(world, 'food_collected', 0)
+                
+            # Fitness is the exact AVERAGE performance across all map layouts
+            bug.fitness = total_score_across_trials / trials
+
+        # 3. Sort the population by true average fitness
+        population.sort(key=lambda b: getattr(b, 'fitness', 0), reverse=True)
+        
+        # Calculate stats for the console
+        top_score = population[0].fitness
+        avg_score = sum(b.fitness for b in population) / population_size
+        
+        # Standard generation heartbeat log
+        print(f"Gen {gen + 1:03d} | Top Avg Food: {top_score:<5.1f} | Pop Avg Food: {avg_score:.2f}")
+
+        # Announce when the AI breaks a new ceiling
+        if top_score > overall_best_score:
+            overall_best_score = top_score
+            Log.info(f"New Top Bug evolved in Gen {gen + 1} with a true average score of {top_score:.1f}!")
+
+        # 4. Selection and Mutation
+        num_parents = max(2, population_size // 10)
+        parents = population[:num_parents]
+        
+        next_generation = []
+        
+        # Elitism: Keep the absolute best bugs exactly as they are
+        next_generation.extend(parents)
+        
+        # Fill the rest of the population with mutated children
+        while len(next_generation) < population_size:
+            parent = random.choice(parents)
+            
+            child_brain = parent.mutate(mutation_rate=mutation_rate)
+            child_bug = NeuralBug(vision_cone=training_cone, brain=child_brain)
+            next_generation.append(child_bug)
+            
+        population = next_generation
+
+    Log.info("\n--- NEURAL EVOLUTION COMPLETE ---")
+    best_bug = population[0]
+    Log.info(f"Final Bug reached a top average score of {best_bug.fitness:.1f}")
+    
+    return best_bug
+
+def train_neural_algorithm_with_trials_and_fitness(
+    generations=GENERATIONS, 
+    population_size=POP_SIZE, 
+    mutation_rate=MUTATION_RATE, 
+    trials=3,
+    fitness_fn=fitness_gluttony
+):
+    # Dynamically log which fitness function is driving this evolution
+    fitness_name = fitness_fn.__name__.upper()
+    Log.info(f"--- STARTING NEURAL EVOLUTION ({fitness_name}) ---")
+    Log.info(f"Generations: {generations} | Population: {population_size} | Trials: {trials}\n")
+    
+    training_cone = VISION_CONES["Radar"]
+    population = [NeuralBug(vision_cone=training_cone) for _ in range(population_size)]
+    overall_best_score = -9999999 
+    
+    for gen in range(generations):
+        
+        for bug in population:
+            total_fitness_across_trials = 0
+            
+            for _ in range(trials):
+                starting_food = generate_initial_food()
+                world = World(initial_food=starting_food)
+                until_we_die = LIFE_FORCE
+                turns_survived = 0
+                
+                for turn in range(MAX_ITERATIONS):
+                    until_we_die -= 1
+                    turns_survived += 1
+                    
+                    perception = world.get_perception(**bug.vision_cone)
+                    next_action = bug.request_action(perception=perception)
+                    move_result = world.move_relative(next_action)
+                    
+                    if move_result == "food":
+                        until_we_die = LIFE_FORCE
+                
+                    if until_we_die <= 0:
+                        break 
+                        
+                # --- NEW: Call the injected fitness function ---
+                trial_score = fitness_fn(world, turns_survived)
+                total_fitness_across_trials += trial_score
+                
+            bug.fitness = total_fitness_across_trials / trials
+
+        population.sort(key=lambda b: getattr(b, 'fitness', -99999), reverse=True)
+        
+        top_score = population[0].fitness
+        avg_score = sum(b.fitness for b in population) / population_size
+        
+        print(f"Gen {gen + 1:03d} | Top Score: {top_score:<7.1f} | Avg Score: {avg_score:.2f}")
+
+        if top_score > overall_best_score:
+            overall_best_score = top_score
+            Log.info(f"New Best Bug! ({fitness_name} Score: {top_score:.1f})")
+
+        # 4. Selection and Mutation
+        num_parents = max(2, population_size // 10)
+        parents = population[:num_parents]
+        
+        next_generation = []
+        
+        # Elitism: Keep the absolute best bugs exactly as they are
+        next_generation.extend(parents)
+        
+        # Fill the rest of the population with mutated children
+        while len(next_generation) < population_size:
+            parent = random.choice(parents)
+            
+            child_brain = parent.mutate(mutation_rate=mutation_rate)
+            child_bug = NeuralBug(vision_cone=training_cone, brain=child_brain)
+            next_generation.append(child_bug)
+            
+        population = next_generation
+
+
+    Log.info("\n--- NEURAL EVOLUTION COMPLETE ---")
+    best_bug = population[0]
+    Log.info(f"Final Bug reached a top average score of {best_bug.fitness:.1f}")
+    
+    return best_bug
+
 if __name__ == "__main__":
-    basic_bugs()
-    train_genetic_algorithm()
+    #
+    # Basic Bugs tests the Rules based bugs
+    #
+    # basic_bugs()
+
+    #
+    # Genetic Algorithm is simple weights and outputs.
+    # Think of them like a cell: it gets input and can
+    # decide to move somewhere but that's it.
+    #
+    # train_genetic_algorithm()
+
+    #
+    # Neural Networks
+    # Now we are getting into the fun stuff. This gets to
+    # have a real "brain", with hidden "layers", activation,
+    # all those magic words. 
+    #
+    # train_neural_algorithm()
+    # train_neural_algorithm_with_trials()
+
+    #
+    # Train with Trials and Fitness
+    #
+    # allows you to give it a custom fitness function and runs the
+    # Bug through generations of testing, driving by args or CONSTS above
+    #
+    train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_gluttony)
+    #
+    # 2026-06-03 13:49:27 [info     ] New Best Bug! (FITNESS_GLUTTONY Score: 1620.0)
+    # Gen 047 | Top Score: 904.3   | Avg Score: 148.05
+    # Gen 048 | Top Score: 1040.0  | Avg Score: 155.76
+    # Gen 049 | Top Score: 814.0   | Avg Score: 148.25
+    # Gen 050 | Top Score: 961.0   | Avg Score: 158.42
+    # 2026-06-03 13:53:04 [info     ] 
+    #
+    train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_longevity)
+    #
+    # 2026-06-03 14:08:54 [info     ] New Best Bug! (FITNESS_LONGEVITY Score: 17910.0)
+    # Gen 037 | Top Score: 10512.7 | Avg Score: 1474.62
+    # Gen 038 | Top Score: 16718.3 | Avg Score: 1522.48
+    # Gen 039 | Top Score: 12747.0 | Avg Score: 1757.20
+    #
+    train_neural_algorithm_with_trials_and_fitness(fitness_fn=fitness_efficiency)
