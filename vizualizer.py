@@ -3,7 +3,7 @@ import sys
 import json 
 
 from bugs import (
-    MemoryBug, NeuralBug, BrainBug, 
+    MemoryBug, NeuralBug, BrainBug, TorchBug,
     World, generate_walls, generate_initial_food, 
     MAX_X, MAX_Y, PLAYER_CHAR, WALL_CHAR, FOOD_CHAR,
     LIFE_FORCE 
@@ -200,6 +200,8 @@ def run_visualizer(filename, layout="u_trap"):
             bug = NeuralBug.load_from_file(filename)
         elif bug_type == "BrainBug":
             bug = BrainBug.load_from_file(filename)
+        elif bug_type == "TorchBug":
+            bug = TorchBug.load_from_file(filename)
         else:
             print(f"Unknown bug type in JSON: {bug_type}")
             sys.exit()
@@ -259,4 +261,4 @@ def run_visualizer(filename, layout="u_trap"):
     pygame.quit()
 
 if __name__ == "__main__":
-    run_visualizer("bug_saves/memory-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")
+    run_visualizer("bug_saves/torchnn-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")
