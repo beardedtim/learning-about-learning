@@ -6,20 +6,31 @@ import concurrent.futures
 import os
 #
 # DEFAULTS
+#
 
-# How many times we want to run each Bug through the trial?
+# A legacy training parameter for epoch-based experiments.
+# NOTE: this is defined for compatibility but is not currently used by the
+# active training loop in this file.
 NUM_EPOCHS = 250
 
-# Position is (0, 0) top left, (MAX_X, MAX_Y bottom right)
-# Max width we allow for the world
+# Coordinate system and world bounds:
+# - (0, 0) is the top-left corner of the map.
+# - Valid tile coordinates are inside the range 1 .. MAX_X-1 and 1 .. MAX_Y-1.
+# - Any point with x <= 0, x >= MAX_X, y <= 0, or y >= MAX_Y is treated as
+#   outside the playable area and behaves like a wall.
 MAX_X = 20
-# Max height we allow for the world
 MAX_Y = 20
 
+# The player's spawn location inside the world.
 PLAYER_START = (10, 10)
 
+# Default number of food items placed into each new world.
 DEFAULT_INITIAL_FOOD_COUNT = 12
 
+# Preset vision configurations for different bug sensory styles.
+# Each preset defines how far the bug can raycast in each relative direction.
+# These values feed directly into World.get_perception() to build the bug's
+# sensory input before it decides on an action.
 VISION_CONES = {
     # THE BALANCED
     # Simulates a standard predator. Good forward visibility with just 
@@ -80,6 +91,8 @@ VISION_CONES = {
     }
 }
 
+# The default vision cone used when a bug does not specify one explicitly.
+# This is a shallow reference to the Balanced preset above.
 DEFAULT_VISION_CONE = VISION_CONES.get("Balanced")
 
 
@@ -255,13 +268,21 @@ def generate_walls(layout="empty"):
                 
     return list(walls)
 
-# Max moves we allow between food
+# How many turns a bug can survive without eating before it starves.
+# This counter resets to the maximum whenever the bug consumes food.
 LIFE_FORCE = 25
+
+# Hard deadline for a single simulation run. Prevents infinite wandering
+# and keeps fitness evaluation bounded in time.
 MAX_ITERATIONS = 10000
 
 #
-# Genetic Algo Defaults
+# Genetic algorithm default hyperparameters
 #
+# GENERATIONS: number of evolutionary rounds to run.
+# POP_SIZE: number of candidates evaluated each generation.
+# MUTATION_RATE: strength of random variation applied during breeding.
+# TRIALS_PER_EPOCH: number of separate random worlds each bug plays per fitness estimate.
 GENERATIONS = 250
 POP_SIZE = 5000
 MUTATION_RATE = 0.075
@@ -312,6 +333,11 @@ PLAYER_ARROWS = {
 #
 
 class World:
+    """
+    Represents the game world state used by a single simulation.
+    The world stores the player, walls, and food in a sparse tile map,
+    and provides movement plus perception utilities for the bug.
+    """
     def __init__(self, 
                  max_x=MAX_X, 
                  max_y=MAX_Y, 
@@ -343,7 +369,9 @@ class World:
 
     def draw_viewport(self, view_radius=5):
         """
-        Draws a grid around the player. 
+        Draws an absolute, centered viewport around the player.
+        This visualizes the portion of the world within the requested radius,
+        marking walls, food, empty tiles, and the player's current facing.
         """
         (p_x, p_y) = self.player_loc
         facing_str = FACING_NAMES.get(self.player_facing, "UNKNOWN")
@@ -354,7 +382,7 @@ class World:
             row_chars = []
 
             for x in range(p_x - view_radius, p_x + view_radius + 1):
-                if x < 0 or x > MAX_X or y < 0 or y > MAX_Y:
+                if x < 0 or x > self.MAX_X or y < 0 or y > self.MAX_Y:
                     row_chars.append(WALL_CHAR)
                 elif (x, y) == self.player_loc:
                     row_chars.append(PLAYER_ARROWS.get(self.player_facing, PLAYER_CHAR))
@@ -366,6 +394,11 @@ class World:
             print(" ".join(row_chars))
 
     def get_line_of_sight(self, distance, dx, dy):
+        """
+        Raycasts from the player's position in a single absolute direction.
+        Returns the sequence of seen tiles up to the requested distance,
+        stopping early at world boundaries, walls, or blocked diagonal corners.
+        """
         p_x, p_y = self.player_loc
         results = []
     
@@ -406,9 +439,15 @@ class World:
         forward=0, left=0, back=0, right=0, 
         forward_left=0, forward_right=0, back_left=0, back_right=0
     ):
+        """
+        Builds the bug's current sensory view in all eight relative directions.
+        It converts the current facing into absolute ray vectors, then performs
+        line-of-sight raycasts for each direction using the supplied vision distances.
+        """
         fx, fy = self.player_facing
         
         # 1. Primary Vectors
+        # Convert the current facing into absolute cardinal ray directions.
         forward_dx, forward_dy = fx, fy
         back_dx, back_dy       = -fx, -fy
         left_dx, left_dy       = fy, -fx
@@ -416,6 +455,8 @@ class World:
 
         # 2. Diagonal Vectors 
         # --- Clamp the diagonals so the raycasts don't leap over tiles ---
+        # Diagonal movement is represented by combining the cardinal vectors,
+        # but then clamping to [-1, 1] so the raycast remains step-by-step.
         fl_dx = max(-1, min(1, forward_dx + left_dx))
         fl_dy = max(-1, min(1, forward_dy + left_dy))
         
@@ -442,7 +483,11 @@ class World:
         }
     
     def spawn_food(self):
-        """Spawns a single piece of food in a random, empty location."""
+        """
+        Spawns a single piece of food in a random empty location inside the current world.
+        The new food is only placed on tiles that are not currently occupied by the player,
+        a wall, or existing food.
+        """
         while True:
             # Pick a random spot inside the world boundaries
             new_x = random.randint(1, self.MAX_X - 1)
@@ -456,8 +501,9 @@ class World:
     
     def move_relative(self, action):
         """
-        Moves the player based on a relative action.
-        Updates orientation, handles boundaries, and spawns new food when eaten.
+        Converts a relative movement command into an absolute move.
+        This updates the bug's facing direction, enforces world boundaries and wall
+        collisions, prevents illegal diagonal corner-cutting, and handles food consumption.
         """
         fx, fy = self.player_facing
         
@@ -478,7 +524,7 @@ class World:
         elif action == "back_right":   dx, dy = b_dx + r_dx, b_dy + r_dy
         else: return None
 
-        # 1c. CLAMP THE VECTOR (Crucial for 8-way grids)
+        # 1c. CLAMP THE VECTOR
         # This forces the movement to be at most 1 tile in any direction,
         # preventing "2 tile jumps" when turning from an already diagonal stance.
         dx = max(-1, min(1, dx))
@@ -823,30 +869,41 @@ class NumpyNeuralNet:
 
 class NeuralBug(BaseBug):
     """
-    The NeuralBug is allowed to have an actual network of neurons, not just
-    some hardcoded heuristics.
+    A perceptron-based bug with a fixed-size neural network brain.
+
+    NeuralBug converts relative perception into a 17-element input vector:
+    - 8 food proximity values
+    - 8 immediate wall indicators
+    - 1 normalized life force value
+
+    The brain emits 8 output scores, one per relative movement direction.
+    The chosen action is the direction with the highest output.
     """
     def __init__(self, vision_cone, brain=None):
         super().__init__(vision_cone)
         
-        # The Directions array MUST stay in this exact order so the brain 
-        # understands which input/output index matches which direction.
+        # The direction order is critical: it must match the brain's input/output mapping.
         self.directions = [
             "forward", "forward_left", "forward_right", 
             "left", "right", 
             "back_left", "back_right", "back"
         ]
         
-        # 17 Inputs (8 food, 8 walls, 1 life force), 12 Hidden Neurons, 8 Outputs (Movement choices)
+        # 17 Inputs (8 food, 8 walls, 1 life force), 12 Hidden Neurons, 8 Outputs (movement choices)
         if brain is None:
             self.brain = NumpyNeuralNet(input_size=17, hidden_size=12, output_size=8)
         else:
             self.brain = brain
 
     def request_action(self, perception):
+        """
+        Converts the current perception into a neural input vector, evaluates the
+        brain, and returns the relative movement direction with the highest score.
+        """
         inputs = []
         
-        # --- BUILD THE INPUT VECTOR (16 numbers) ---
+        # --- BUILD THE INPUT VECTOR (17 numbers) ---
+        # 8 food signals followed by 8 wall signals and 1 life force value.
         food_inputs = []
         wall_inputs = []
         
@@ -873,15 +930,15 @@ class NeuralBug(BaseBug):
         max_life = getattr(self, 'max_life_force', 100)
         normalized_hunger = current_life / max_life
 
-        # Combine them into a single list of 16 numbers
+        # Combine them into a single list of 17 numbers (8 food + 8 walls + 1 life force).
         inputs = np.array(food_inputs + wall_inputs + [normalized_hunger], dtype=np.float32)
 
         # --- THINK ---
-        # Pass the inputs into the neural network to get 8 output scores
+        # Pass the inputs through the brain to get 8 output scores.
         output_scores = self.brain.forward(inputs)
 
         # --- ACT ---
-        # Find the index of the highest score, and return that direction
+        # Choose the movement with the highest output score.
         best_index = output_scores.index(max(output_scores))
 
         # --- STORE ---
@@ -891,13 +948,20 @@ class NeuralBug(BaseBug):
         return self.directions[best_index]
 
     def mutate(self, mutation_rate=0.05):
-        # Mutate the neural network and pass it into a new child bug
+        """
+        Returns a mutated copy of this bug's neural brain.
+        This helper is used by reproduction routines to create variation.
+        """
         mutated_brain = self.brain.mutate(rate=mutation_rate)
 
         return mutated_brain
     
     def spawn_child(self, mutation_rate, other_parent=None):
-        """Returns a brand new NeuralBug with a mixed and mutated brain."""
+        """
+        Produces a new NeuralBug offspring from this bug's brain.
+        If another parent is provided, the offspring uses crossover to mix brains.
+        Otherwise it clones this bug's brain and applies mutation.
+        """
         
         # 1. If we have a mate, mix the brains together
         if other_parent is not None:
@@ -968,8 +1032,21 @@ class NeuralBug(BaseBug):
 
 class MemoryBug(BaseBug):
     """
-    A NeuralBug with a recurrent "scratchpad". It passes its previous thoughts 
-    back into its own brain on the next turn.
+    A NeuralBug extension with a recurrent memory vector.
+
+    MemoryBug appends a small scratchpad of previous outputs to its input vector.
+    This allows it to carry short-term state across turns without a more complex
+    recurrent network architecture.
+
+    Input vector layout:
+    - 8 food proximity values
+    - 8 wall indicators
+    - 1 normalized life force value
+    - N memory values (default 4)
+
+    Output vector layout:
+    - 8 movement scores
+    - N memory values to retain for the next turn
     """
     def __init__(self, vision_cone, brain=None, memory_size=4):
         super().__init__(vision_cone)
@@ -986,8 +1063,8 @@ class MemoryBug(BaseBug):
         self.memory = np.zeros(self.memory_size)
         
         if brain is None:
-            # 16 vision + 1 life force + 4 memory = 20 Inputs
-            # 8 movements + 4 memory = 12 Outputs
+            # 16 vision + 1 life force + 4 memory = 21 Inputs
+            # 8 movement outputs + 4 memory outputs = 12 Outputs
             self.brain = NumpyNeuralNet(
                 input_size=17 + self.memory_size, 
                 hidden_size=20, 
@@ -997,10 +1074,20 @@ class MemoryBug(BaseBug):
             self.brain = brain
 
     def reset_memory(self):
-        """Called by the Simulation before the first turn."""
+        """
+        Clears the recurrent memory buffer before a new simulation starts.
+        This ensures each run begins with a blank internal state.
+        """
         self.memory = np.zeros(self.memory_size)
 
     def request_action(self, perception):
+        """
+        Builds the extended input vector, runs the brain, and returns the
+        relative movement direction with the highest score.
+
+        The MemoryBug reuses its previous memory outputs as additional inputs
+        on the next turn, enabling short-term continuity across decisions.
+        """
         # 1. Build the vision inputs (16 numbers) just like before
         food_inputs = []
         wall_inputs = []
@@ -1024,10 +1111,7 @@ class MemoryBug(BaseBug):
             food_inputs.append(food_score)
             wall_inputs.append(wall_score)
             
-        vision_inputs = food_inputs + wall_inputs
-
-        # 2. Combine Inputs
-        # Convert our NumPy memory array to a list and stitch them together
+        # 2. Combine vision inputs and current life force into 17 values
         current_life = getattr(self, 'life_force', 100)
         max_life = getattr(self, 'max_life_force', 100)
         normalized_hunger = current_life / max_life
@@ -1059,7 +1143,12 @@ class MemoryBug(BaseBug):
         return self.directions[best_index]
 
     def spawn_child(self, mutation_rate, other_parent=None):
-        """Returns a brand new MemoryBug with a mixed and mutated brain. We ignore other_parent but keep it for API"""
+        """
+        Produces a new MemoryBug offspring from this bug's brain.
+        If another parent is provided, the offspring uses crossover to mix brains.
+        Otherwise it clones this bug's brain and applies mutation.
+        The child's memory_size is preserved from the parent.
+        """
         if other_parent is not None:
             mixed_brain = self.brain.crossover(other_parent.brain)
         else:
@@ -1181,7 +1270,7 @@ class Simulation:
 #
 def evaluate_single_bug_worker(args):
     # --- Accept map_layout ---
-    bug, trials, fitness_fn, result_goal, map_layout = args
+    bug, trials, fitness_fn, map_layout = args
     total_fitness = 0
     
     for _ in range(trials):
@@ -1193,7 +1282,7 @@ def evaluate_single_bug_worker(args):
         sim = Simulation(world, bug)
         results = sim.run()
         
-        trial_score = fitness_fn(world, results[result_goal])
+        trial_score = fitness_fn(world, results["turns_survived"])
         total_fitness += trial_score
         
     return total_fitness / trials
@@ -1207,7 +1296,6 @@ class EvolutionaryTrainer:
                  population_size=POP_SIZE, 
                  mutation_rate=MUTATION_RATE, 
                  trials=1,
-                 simulation_result_goal="turns_survived",
                  map_layout="empty"):
         
         self.bug_class = bug_class
@@ -1217,7 +1305,6 @@ class EvolutionaryTrainer:
         self.population_size = population_size
         self.mutation_rate = mutation_rate
         self.trials = trials
-        self.simulation_result_goal = simulation_result_goal
         self.map_layout = map_layout
         
         self.overall_best_score = -9999999 
@@ -1238,7 +1325,7 @@ class EvolutionaryTrainer:
                 
                 # Pack up the arguments each CPU core needs into a tuple
                 worker_args = [
-                    (bug, self.trials, self.fitness_fn, self.simulation_result_goal, self.map_layout)
+                    (bug, self.trials, self.fitness_fn, self.map_layout)
                     for bug in population
                 ]
                 
@@ -1405,6 +1492,8 @@ if __name__ == "__main__":
         fitness_feast_or_famine
     ]
 
+    MAP_CREATION_TYPE = "dungeon"
+
     for fitness_fn in fitness_fns:
         for name, vision in VISION_CONES.items():
             trainer_neural = EvolutionaryTrainer(
@@ -1414,7 +1503,7 @@ if __name__ == "__main__":
                 population_size=POP_SIZE,
                 mutation_rate=MUTATION_RATE,
                 fitness_fn=fitness_fn,
-                map_layout="maze",
+                map_layout=MAP_CREATION_TYPE,
                 trials=TRIALS_PER_EPOCH
             )
 
@@ -1425,12 +1514,12 @@ if __name__ == "__main__":
                 generations=GENERATIONS,
                 population_size=POP_SIZE,
                 mutation_rate=MUTATION_RATE,
-                map_layout="maze",
+                map_layout=MAP_CREATION_TYPE,
                 trials=TRIALS_PER_EPOCH
             )
 
             best_neural = trainer_neural.train()
-            best_neural.save_to_file(f'bug_saves/neural-{name}-{fitness_fn.__name__}-maze.json')
+            best_neural.save_to_file(f'bug_saves/neural-{name}-{fitness_fn.__name__}-dungeon.json')
 
             best_memory = trainer_memory.train()
-            best_memory.save_to_file(f"bug_saves/memory-{name}-{fitness_fn.__name__}-maze.json")
+            best_memory.save_to_file(f"bug_saves/memory-{name}-{fitness_fn.__name__}-dungeon.json")
