@@ -11,4 +11,5 @@ wheels/
 
 simulation_history.log
 bug_saves/*
+bug_saves_bac/*
 !bug_saves/.gitkeep

@@ -4,10 +4,14 @@ import json
 
 from bugs import (
     MemoryBug, NeuralBug, BrainBug, TorchBug,
-    World, generate_walls, generate_initial_food, 
-    MAX_X, MAX_Y, PLAYER_CHAR, WALL_CHAR, FOOD_CHAR,
-    LIFE_FORCE 
 )
+
+from world import (
+    World, generate_initial_food, generate_walls, MAX_X, MAX_Y,
+    PLAYER_CHAR, WALL_CHAR, FOOD_CHAR
+)
+
+from trainers import DEFAULT_LIFE_FORCE
 
 # --- VISUAL SETTINGS ---
 CELL_SIZE = 30       
@@ -210,8 +214,8 @@ def run_visualizer(filename, layout="u_trap"):
         print("Could not find the JSON file!")
         sys.exit()
 
-    bug.max_life_force = LIFE_FORCE
-    bug.life_force = LIFE_FORCE
+    bug.max_life_force = DEFAULT_LIFE_FORCE
+    bug.life_force = DEFAULT_LIFE_FORCE
 
     if hasattr(bug, 'reset_memory'):
         bug.reset_memory()
@@ -261,4 +265,4 @@ def run_visualizer(filename, layout="u_trap"):
     pygame.quit()
 
 if __name__ == "__main__":
-    run_visualizer("bug_saves/torchnn-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")
+    run_visualizer("bug_saves/memory-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")
