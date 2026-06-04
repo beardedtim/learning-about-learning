@@ -16,12 +16,10 @@ class Simulation:
             self.bug.reset_memory()
         
         turns_survived = 0
+        food_collected_this_run = 0 # Track locally to prevent World state leakage
 
         for turn in range(self.max_iterations):
-            self.bug.life_force -= 1
-            turns_survived += 1
-            
-            # 1. Look
+            # 1. Look (Bug sees its true energy state)
             perception = self.world.get_perception(**self.bug.vision_cone)
             
             # 2. Think
@@ -30,19 +28,22 @@ class Simulation:
             # 3. Act
             move_result = self.world.move_relative(next_action)
             
-            # 4. React (Restore the bug's life force if it eats)
-            if move_result == "food":
+            # 4. Pay the Energy Cost
+            self.bug.life_force -= 1
+            turns_survived += 1
+            
+            # 5. React (Restore the bug's life force if it eats)
+            # Recommend importing FOOD_CHAR and using it here if move_result returns characters
+            if move_result == "food": 
                 self.bug.life_force = self.bug.max_life_force
+                food_collected_this_run += 1
         
-            # 5. Check Survival
+            # 6. Check Survival
             if self.bug.life_force <= 0:
                 break
                 
-        # Return standard metrics so the trainer knows what happened
-        food_collected = getattr(self.world, 'food_collected', 0)
-        
         return {
             "turns_survived": turns_survived,
-            "food_collected": food_collected,
+            "food_collected": food_collected_this_run,
             "starved": self.bug.life_force <= 0
         }

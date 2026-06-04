@@ -1,15 +1,6 @@
-from log import Log
 import random
-import json
-import numpy as np
-import concurrent.futures
 import os
-
-import torch
-import torch.nn as nn
-import copy
-import torch.multiprocessing as tmp
-
+import json
 #
 # DEFAULTS
 #
@@ -28,27 +19,59 @@ PLAYER_START = (10, 10)
 # Default number of food items placed into each new world.
 DEFAULT_INITIAL_FOOD_COUNT = 12
 
-def generate_initial_food(walls=None, num_items=DEFAULT_INITIAL_FOOD_COUNT):
+def generate_initial_food(walls=None, num_items=DEFAULT_INITIAL_FOOD_COUNT, layout="empty"):
     """
-    Randomly generates a list of unique food coordinates.
-    Ensures food does not spawn on the player or inside a wall.
+    Randomly generates a list of unique food coordinates, or loads them from a saved map.
     """
+    # --- Check for saved map JSON ---
+    if layout.startswith("map_"):
+        filepath = os.path.join("maps", f"{layout}.json")
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                map_data = json.load(f)
+                
+            # Cast the JSON arrays back into Python tuples
+            return [tuple(coord) for coord in map_data.get("initial_food", [])]
+
+    # --- Standard Random Generation ---
     food_positions = set()
     wall_set = set(walls) if walls else set()
     
     while len(food_positions) < num_items:
-        x = random.randint(1, MAX_X - 1)
-        y = random.randint(1, MAX_Y - 1)
-        new_pos = (x, y)
+        # We calculate available spaces to prevent infinite loops on densely packed maps
+        available_spaces = [
+            (x, y) for x in range(1, MAX_X) for y in range(1, MAX_Y)
+            if (x, y) != PLAYER_START and (x, y) not in wall_set
+        ]
         
-        # --- Check that the spot isn't a wall ---
-        if new_pos != PLAYER_START and new_pos not in food_positions and new_pos not in wall_set:
-            food_positions.add(new_pos)
+        # If the map is so full of walls that we can't fit the requested food, stop early
+        if len(available_spaces) < num_items:
+            num_items = len(available_spaces)
+            if num_items == 0:
+                break
+                
+        new_pos = random.choice(available_spaces)
+        food_positions.add(new_pos)
             
     return list(food_positions)
 
 def generate_walls(layout="empty"):
     """Generates a list of coordinates for wall placements based on a layout preset."""
+    
+    # --- NEW: Check for saved map JSON ---
+    if layout.startswith("map_"):
+        filepath = os.path.join("maps", f"{layout}.json")
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                map_data = json.load(f)
+                
+            # JSON saves coordinate tuples as lists (e.g., [[1, 2], [3, 4]]). 
+            # We must cast them back to tuples so they can be hashed in World's state_dict.
+            return [tuple(coord) for coord in map_data.get("walls", [])]
+        else:
+            print(f"Warning: Saved map '{filepath}' not found. Defaulting to empty walls.")
+            return []
+
     walls = set()
     
     if layout == "empty":
@@ -86,6 +109,7 @@ def generate_walls(layout="empty"):
         for y in range(mid_y - 3, mid_y + 3):
             walls.add((mid_x - 4, y))
             walls.add((mid_x + 4, y))
+            
     elif layout == "maze":
         # 1. Fill the entire inner grid with walls
         for x in range(1, MAX_X):
@@ -200,7 +224,6 @@ def generate_walls(layout="empty"):
                 
     return list(walls)
 
-
 #
 # CONSTS
 #
@@ -227,11 +250,16 @@ RELATIVE_DIRECTIONS = [
     "forward_right"
 ]
 
+NORTH_EAST = (1, -1)
+NORTH_WEST = (-1, -1)
+SOUTH_EAST = (1, 1)
+SOUTH_WEST = (-1, 1)
+
+# And add them to your FACING_NAMES dictionary
 FACING_NAMES = {
-    NORTH: "NORTH",
-    SOUTH: "SOUTH",
-    EAST:  "EAST",
-    WEST:  "WEST"
+    NORTH: "NORTH", SOUTH: "SOUTH", EAST: "EAST", WEST: "WEST",
+    NORTH_EAST: "NORTH_EAST", NORTH_WEST: "NORTH_WEST", 
+    SOUTH_EAST: "SOUTH_EAST", SOUTH_WEST: "SOUTH_WEST"
 }
 
 PLAYER_ARROWS = {
@@ -478,10 +506,7 @@ class World:
         # --- Check for food ---
         if target_content == FOOD_CHAR:
             result = "food"
-            # Track the score and spawn a new piece of food
-            if not hasattr(self, 'food_collected'): 
-                self.food_collected = 0
-            self.food_collected += 1
+
             self.spawn_food()
 
         # 6. Execute the move

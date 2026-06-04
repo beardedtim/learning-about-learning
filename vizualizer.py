@@ -1,13 +1,15 @@
 import pygame
 import sys
 import json 
+import os
+import uuid
 
 from bugs import (
     MemoryBug, NeuralBug, BrainBug, TorchBug,
 )
 
 from world import (
-    World, generate_initial_food, generate_walls, MAX_X, MAX_Y,
+    RELATIVE_DIRECTIONS, World, generate_initial_food, generate_walls, MAX_X, MAX_Y,
     PLAYER_CHAR, WALL_CHAR, FOOD_CHAR
 )
 
@@ -111,8 +113,10 @@ def draw_vision_cone(screen, world, bug):
 
 def draw_dashboard(screen, font, bug, turns, food):
     dash_x = MAX_X * CELL_SIZE
-    pygame.draw.rect(screen, DASH_BG, (dash_x, 0, DASHBOARD_WIDTH, MAX_Y * CELL_SIZE))
-    pygame.draw.line(screen, HIGHLIGHT_COLOR, (dash_x, 0), (dash_x, MAX_Y * CELL_SIZE), 3)
+    screen_h = screen.get_height() # Dynamically grab the new height
+    
+    pygame.draw.rect(screen, DASH_BG, (dash_x, 0, DASHBOARD_WIDTH, screen_h))
+    pygame.draw.line(screen, HIGHLIGHT_COLOR, (dash_x, 0), (dash_x, screen_h), 3)
 
     # --- 1. Global Stats ---
     y_offset = 20
@@ -156,7 +160,8 @@ def draw_dashboard(screen, font, bug, turns, food):
     action_scores = getattr(bug, 'last_action_scores', [0]*8)
     best_idx = action_scores.index(max(action_scores)) if action_scores else -1
 
-    for i, direction in enumerate(bug.directions):
+    directions = getattr(bug, 'directions', RELATIVE_DIRECTIONS)
+    for i, direction in enumerate(directions):
         score = action_scores[i]
         color = (100, 255, 100) if i == best_idx else (150, 150, 150)
         screen.blit(font.render(f"{direction:<14}: {score:>5.2f}", True, color), (dash_x + 20, y_offset + (i * 18)))
@@ -167,25 +172,25 @@ def draw_dashboard(screen, font, bug, turns, food):
     y_offset += 25
     
     if hasattr(bug, 'last_perception'):
-        for direction in bug.directions:
+        for direction in directions:
             view_array = bug.last_perception.get(direction, [])
-            
-            # Format the array into a string like "[_, _, X]" for the dashboard
             view_str = f"[{' '.join(view_array)}]" 
-            
-            # If the bug saw food, highlight the text red!
             color = FOOD_COLOR if FOOD_CHAR in view_array else TEXT_COLOR
-            
             screen.blit(font.render(f"{direction:<14}: {view_str}", True, color), (dash_x + 20, y_offset))
             y_offset += 18
 
 def run_visualizer(filename, layout="u_trap"):
     pygame.init()
-    # Switched to a slightly smaller font so everything fits cleanly
     font = pygame.font.SysFont("courier", 14, bold=True) 
     
-    screen_width = (MAX_X * CELL_SIZE) + DASHBOARD_WIDTH
-    screen_height = MAX_Y * CELL_SIZE
+    # --- Extend the Window ---
+    BOTTOM_BAR_HEIGHT = 80
+    map_width = MAX_X * CELL_SIZE
+    map_height = MAX_Y * CELL_SIZE
+    
+    screen_width = map_width + DASHBOARD_WIDTH
+    screen_height = map_height + BOTTOM_BAR_HEIGHT
+    
     screen = pygame.display.set_mode((screen_width, screen_height))
     pygame.display.set_caption(f"Dashboard - {layout.upper()}")
     clock = pygame.time.Clock()
@@ -221,48 +226,112 @@ def run_visualizer(filename, layout="u_trap"):
         bug.reset_memory()
 
     walls = generate_walls(layout)
-    food = generate_initial_food(walls=walls)
-    world = World(initial_food=food, initial_walls=walls)
+    initial_food = generate_initial_food(walls=walls, layout=layout)
     
-    running = True
+    # Pass a copy of the food list so the original layout is preserved for restarts
+    world = World(initial_food=list(initial_food), initial_walls=list(walls))
+    
+    running = True            
+    simulation_active = True  
     turns_survived = 0
     food_eaten = 0
     
+    # --- Button UI Definitions ---
+    # Shifted to accommodate 3 buttons
+    btn_y = map_height + 20
+    restart_btn = pygame.Rect(20, btn_y, 120, 40)
+    save_btn = pygame.Rect(150, btn_y, 120, 40)
+    close_btn = pygame.Rect(280, btn_y, 120, 40)
+    dash_x = map_width
+
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
                 running = False
+                
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if close_btn.collidepoint(event.pos):
+                    running = False
+                
+                elif save_btn.collidepoint(event.pos):
+                    os.makedirs("maps", exist_ok=True)
+                    map_guid = f"map_{uuid.uuid4().hex[:8]}"
+                    filepath = os.path.join("maps", f"{map_guid}.json")
+                    
+                    map_data = {
+                        "layout_name": layout,
+                        "walls": list(walls),
+                        "initial_food": list(initial_food)
+                    }
+                    with open(filepath, 'w') as f:
+                        json.dump(map_data, f, indent=4)
+                    print(f"Map successfully saved to: {filepath}")
 
-        bug.life_force -= 1
+                elif restart_btn.collidepoint(event.pos):
+                    # --- RESTART LOGIC ---
+                    # 1. Rebuild a fresh world using the original saved map data
+                    world = World(initial_food=list(initial_food), initial_walls=list(walls))
+                    
+                    # 2. Reset the bug's biological state
+                    bug.life_force = bug.max_life_force
+                    if hasattr(bug, 'reset_memory'):
+                        bug.reset_memory()
+                        
+                    # 3. Reset the simulation counters and unpause
+                    turns_survived = 0
+                    food_eaten = 0
+                    simulation_active = True
+                    print("Simulation restarted on the same map.")
 
-        perception = world.get_perception(**bug.vision_cone)
-        next_action = bug.request_action(perception=perception)
-        move_result = world.move_relative(next_action)
-        turns_survived += 1
-        
-        if move_result == "food":
-            food_eaten += 1
-            bug.life_force = bug.max_life_force
+        if simulation_active:
+            perception = world.get_perception(**bug.vision_cone)
+            next_action = bug.request_action(perception=perception)
+            move_result = world.move_relative(next_action)
             
-        if bug.life_force <= 0:
-            print(f"Bug starved to death on turn {turns_survived}!")
-            running = False
+            bug.life_force -= 1
+            turns_survived += 1
+            
+            if move_result == "food":
+                food_eaten += 1
+                bug.life_force = bug.max_life_force
+                
+            if bug.life_force <= 0:
+                print(f"Bug starved to death on turn {turns_survived}!")
+                simulation_active = False 
+            
+            if turns_survived > 1500:
+                print("Simulation reached max turns.")
+                simulation_active = False
 
         screen.fill(BG_COLOR)
         draw_world(screen, world)
         
-        # --- NEW: Draw the flashlight overlay ---
-        draw_vision_cone(screen, world, bug)
-        
+        if simulation_active:
+            draw_vision_cone(screen, world, bug)
+            
         draw_dashboard(screen, font, bug, turns_survived, food_eaten)
         
+        # --- Render UI Buttons ---
+        pygame.draw.rect(screen, (50, 100, 200), restart_btn, border_radius=5) # Blue Restart
+        pygame.draw.rect(screen, (50, 150, 50), save_btn, border_radius=5)     # Green Save
+        pygame.draw.rect(screen, (200, 50, 50), close_btn, border_radius=5)    # Red Close
+        
+        restart_text = font.render("RESTART", True, (255, 255, 255))
+        save_text = font.render("SAVE MAP", True, (255, 255, 255))
+        close_text = font.render("CLOSE", True, (255, 255, 255))
+        
+        screen.blit(restart_text, (restart_btn.centerx - restart_text.get_width()//2, restart_btn.centery - restart_text.get_height()//2))
+        screen.blit(save_text, (save_btn.centerx - save_text.get_width()//2, save_btn.centery - save_text.get_height()//2))
+        screen.blit(close_text, (close_btn.centerx - close_text.get_width()//2, close_btn.centery - close_text.get_height()//2))
+
+        if not simulation_active:
+            dead_text = font.render("SIMULATION ENDED", True, (255, 50, 50))
+            screen.blit(dead_text, (dash_x + 20, 10))
+
         pygame.display.flip()
         clock.tick(FPS) 
-        
-        if turns_survived > 1500:
-            running = False
 
     pygame.quit()
-
+     
 if __name__ == "__main__":
-    run_visualizer("bug_saves/memory-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")
+    run_visualizer("bug_saves/torchnn-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")

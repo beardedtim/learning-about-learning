@@ -1,7 +1,7 @@
 import os
-
-from bugs import VISION_CONES, MemoryBug, NeuralBug, TorchBug
-from trainers import EvolutionaryTrainer, fitness_balanced, fitness_efficiency, fitness_feast_or_famine, fitness_gluttony, fitness_longevity, fitness_minimalist, fitness_speed_raider, fitness_sustenance
+from log import Log
+from bugs import VISION_CONES, MemoryBug, NeuralBug, SparseTorchBug, TorchBug
+from trainers import EvolutionaryTrainer, fitness_efficiency, fitness_gluttony, fitness_longevity, fitness_speed_raider
 
 #
 # DEFAULTS
@@ -28,10 +28,6 @@ if __name__ == "__main__":
         fitness_gluttony, 
         fitness_longevity,
         fitness_speed_raider,
-        fitness_sustenance,
-        fitness_balanced,
-        fitness_minimalist,
-        fitness_feast_or_famine
     ]
 
     MAP_CREATION_TYPE = "dungeon"
@@ -39,12 +35,13 @@ if __name__ == "__main__":
     for fitness_fn in fitness_fns:
         for name, vision in VISION_CONES.items():
             print("-"*10)
-            print(f"Vision: {name} - {fitness_fn.__name__}")
+            Log.info("Starting a new training session", name=name, vision=vision,fitness=fitness_fn.__name__)
             print("-"*10)
 
-            neural_path  = f'bug_saves/neural-{name}-{fitness_fn.__name__}-dungeon.json'
-            memory_path  = f"bug_saves/memory-{name}-{fitness_fn.__name__}-dungeon.json"
-            torchnn_path = f"bug_saves/torchnn-{name}-{fitness_fn.__name__}-dungeon.json"
+            neural_path  = f'bug_saves/neural-{name}-{fitness_fn.__name__}-{MAP_CREATION_TYPE}.json'
+            memory_path  = f"bug_saves/memory-{name}-{fitness_fn.__name__}-{MAP_CREATION_TYPE}.json"
+            torchnn_path = f"bug_saves/torchnn-{name}-{fitness_fn.__name__}-{MAP_CREATION_TYPE}.json"
+            sparsetorch_path = f"bug_saves/sparsetorch-{name}-{fitness_fn.__name__}-{MAP_CREATION_TYPE}.json"
 
             if not os.path.exists(neural_path):
                 trainer_neural = EvolutionaryTrainer(
@@ -88,8 +85,25 @@ if __name__ == "__main__":
                     trials=TRIALS_PER_EPOCH,
                     name="TorchNN"
                 )
+
                 best_torchnn = trainer_torchnn.train()
                 best_torchnn.save_to_file(torchnn_path)
+
+            if not os.path.exists(sparsetorch_path):
+                trainer_sparse = EvolutionaryTrainer(
+                    bug_class=SparseTorchBug,
+                    vision_cone=vision,
+                    fitness_fn=fitness_fn,
+                    generations=GENERATIONS,
+                    population_size=POP_SIZE,
+                    mutation_rate=MUTATION_RATE,
+                    map_layout=MAP_CREATION_TYPE,
+                    trials=TRIALS_PER_EPOCH,
+                    name="SparseNN"
+                )
+                
+                best_sparse = trainer_sparse.train()
+                best_sparse.save_to_file(sparsetorch_path)
 
             print("")
             print("")

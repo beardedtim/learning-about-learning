@@ -2,6 +2,7 @@ from log import Log
 import random
 import concurrent.futures
 import os
+import copy
 
 import torch.multiprocessing as tmp
 from world import World,generate_initial_food, generate_walls
@@ -29,20 +30,19 @@ tmp.set_sharing_strategy('file_system')
 # Brokwn out so that we can run in multiprocessing
 #
 def evaluate_single_bug_worker(args):
-    # --- Accept map_layout ---
     bug, trials, fitness_fn, map_layout = args
     total_fitness = 0
     
     for _ in range(trials):
-        # --- Generate the map state sequentially ---
         walls = generate_walls(map_layout)
-        food = generate_initial_food(walls=walls)
+        food = generate_initial_food(walls=walls, layout=map_layout)
         world = World(initial_food=food, initial_walls=walls)
         
         sim = Simulation(world, bug, max_iterations=MAX_ITERATIONS, life_force=DEFAULT_LIFE_FORCE)
         results = sim.run()
         
-        trial_score = fitness_fn(world, results["turns_survived"])
+        # Pass the entire results dict to the fitness function
+        trial_score = fitness_fn(results) 
         total_fitness += trial_score
         
     return total_fitness / trials
@@ -58,7 +58,6 @@ class EvolutionaryTrainer:
                  trials=TRIALS_PER_EPOCH,
                  map_layout="empty",
                  name=None):
-        
         self.bug_class = bug_class
         self.vision_cone = vision_cone
         self.fitness_fn = fitness_fn
@@ -68,6 +67,7 @@ class EvolutionaryTrainer:
         self.trials = trials
         self.map_layout = map_layout
         
+        self.apex_bug = None
         self.overall_best_score = -9999999 
         self.name = name
 
@@ -109,8 +109,10 @@ class EvolutionaryTrainer:
                     top_score=f"{top_score:.1f}", 
                     avg_score=f"{avg_score:.2f}")
                 
+                # Save a distinct copy of the Apex Bug
                 if top_score > self.overall_best_score:
                     self.overall_best_score = top_score
+                    self.apex_bug = copy.deepcopy(population[0])
                     Log.info(f"New Apex Bug! ({fitness_name} Score: {top_score:.1f})")
 
                 # 4. Selection and Mutation
@@ -136,6 +138,10 @@ class EvolutionaryTrainer:
                 population = next_generation
 
         Log.info(f"\n--- {bug_name} EVOLUTION COMPLETE ---")
+        
+        if self.apex_bug is None: 
+            return population[0]
+        
         return population[0] # Return the absolute best bug from the final generation
 
 
@@ -145,97 +151,24 @@ class EvolutionaryTrainer:
 # What does it mean to "win"?
 #
 
-def fitness_gluttony(world, turns_survived):
-    """
-    The 'Yo, food is good' mindset.
-    Ignores how many turns it took, solely rewards the amount of food eaten.
-    Pure greed - only cares about feast quantity.
-    """
-    return float(getattr(world, 'food_collected', 0))
+def fitness_gluttony(results):
+    return float(results.get('food_collected', 0))
 
-def fitness_longevity(world, turns_survived):
-    """
-    The survivalist mindset.
-    Rewards staying alive as long as possible. Food is only a means to an end.
-    Pure endurance - maximize lifespan regardless of consumption.
-    """
-    return float(turns_survived)
+def fitness_longevity(results):
+    return float(results.get('turns_survived', 0))
 
-def fitness_efficiency(world, turns_survived):
-    """
-    A hybrid mindset.
-    Rewards eating food, but PENALIZES taking too long to do it. 
-    Balanced approach - food matters, but speed matters more.
-    """
-    food = getattr(world, 'food_collected', 0)
-    # 50 points per food, minus 1 point for every turn wasted
-    return (food * 50.0) - turns_survived
+def fitness_efficiency(results):
+    food = results.get('food_collected', 0)
+    turns = results.get('turns_survived', 0)
+    return (food * 50.0) - turns
 
-def fitness_speed_raider(world, turns_survived):
+def fitness_speed_raider(results):
     """
     The aggressive hunter.
-    Heavily rewards early food consumption - first meal is CRITICAL.
-    If no food found, penalty scales over time.
-    Specializes in resource-dense environments and direct paths.
+    Rewards total food consumption and penalizes total time taken.
     """
-    food = getattr(world, 'food_collected', 0)
+    food = results.get('food_collected', 0)
+    turns = results.get('turns_survived', 0)
     if food == 0:
-        # Severe penalty for never finding food
-        return -turns_survived
-    # Exponential reward for eating fast (first food most valuable)
-    # Each food eaten at turn T gets: 100 / sqrt(T)
-    # This heavily favors finding food quickly
-    return (food * 100.0) - (turns_survived * 0.5)
-
-def fitness_sustenance(world, turns_survived):
-    """
-    The steady forager.
-    Rewards consistent food-finding over time. The rate of food consumption matters.
-    (food / turns_survived) gives consumption rate - bugs that find food regularly win.
-    Penalizes both starvation AND wandering without eating.
-    """
-    food = getattr(world, 'food_collected', 0)
-    if turns_survived == 0:
-        return 0.0
-    consumption_rate = food / float(turns_survived)
-    # Scale by turns survived to prefer bugs that both eat AND survive
-    return (consumption_rate * 1000.0) + (turns_survived * 0.1)
-
-def fitness_balanced(world, turns_survived):
-    """
-    The Swiss Army knife.
-    Rewards a balanced approach: need both food AND longevity equally.
-    Geometric mean of (food * 50) and turns_survived.
-    Great all-rounder, but not specialized in anything.
-    """
-    food = getattr(world, 'food_collected', 0)
-    food_score = max(1, food * 50.0)  # Avoid log(0)
-    survival_score = max(1, float(turns_survived))
-    # Geometric mean - punishes imbalance
-    return (food_score * survival_score) ** 0.5
-
-def fitness_minimalist(world, turns_survived):
-    """
-    The ascetic philosopher.
-    Rewards LONGEVITY while finding ANY food at all.
-    Gets a baseline for surviving, bonus ONLY if food is found.
-    Bugs that starve get turns_survived/2. Bugs that eat get bonus.
-    """
-    food = getattr(world, 'food_collected', 0)
-    base_score = turns_survived / 2.0
-    food_bonus = food * 30.0
-    return base_score + food_bonus
-
-def fitness_feast_or_famine(world, turns_survived):
-    """
-    The risk-taker's paradox.
-    Extreme risk-reward: massive bonus for finding food quickly, harsh penalty for starvation.
-    Only food count matters - turns are a tiebreaker.
-    Winners: bugs that find ANY food (even 1) survive. Losers: bugs that find nothing.
-    Creates extreme specialization pressure.
-    """
-    food = getattr(world, 'food_collected', 0)
-    if food == 0:
-        return turns_survived - 100.0  # Severe starvation penalty
-    # Every food is worth a LOT - makes specialization attractive
-    return food * 200.0
+        return -turns
+    return (food * 100.0) - (turns * 0.5)

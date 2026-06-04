@@ -737,7 +737,7 @@ class TorchBrain(nn.Module):
     num_layers  : depth of the GRU stack (2 is a good starting point)
     output_size : number of movement choices (always 8 to match RELATIVE_DIRECTIONS)
     """
-    def __init__(self, input_size=17, hidden_size=32, num_layers=2, output_size=8):
+    def __init__(self, input_size=17, hidden_size=8, num_layers=2, output_size=8):
         super().__init__()
         self.input_size  = input_size
         self.hidden_size = hidden_size
@@ -908,7 +908,7 @@ class TorchBug(BaseBug):
         self.__dict__.update(state)
 
     def __init__(self, vision_cone=DEFAULT_VISION_CONE, brain=None,
-                 hidden_size=32, num_layers=2):
+                 hidden_size=16, num_layers=2):
         super().__init__(vision_cone)
  
         self.directions = [
@@ -1058,3 +1058,126 @@ class TorchBug(BaseBug):
             num_layers  = data["num_layers"],
         )
  
+
+class SparseTorchBrain(TorchBrain):
+    """
+    An extension of TorchBrain that implements hybrid/sparse mutations.
+    """
+    def mutate(self, rate=0.05, sparsity=0.10):
+        """
+        rate: The magnitude (std-dev) of the mutation when it occurs.
+        sparsity: The probability (0.0 to 1.0) that any individual weight is mutated.
+        """
+        child = self.clone()
+        eps = 1e-6
+
+        with torch.no_grad():
+            for param in child.parameters():
+                try:
+                    p_std = float(param.std().item())
+                except Exception:
+                    p_std = 0.0
+
+                noise_std = rate * (p_std + eps)
+
+                # 1. Generate the full noise matrix
+                noise = torch.randn_like(param) * noise_std
+
+                # 2. Create a boolean mask based on the sparsity threshold
+                # If sparsity is 0.10, roughly 10% of the elements will be True
+                mutation_mask = torch.rand_like(param) < sparsity
+
+                # 3. Apply the mask to the noise (zeroing out the unselected 90%)
+                # and add it to the parameter in-place
+                param.add_(noise * mutation_mask)
+
+        return child
+    
+
+class SparseTorchBug(TorchBug):
+    """
+    A bug that uses a GRU brain but applies sparse, hybrid mutations 
+    to preserve learned memory structures across generations.
+    """
+    def __init__(self, vision_cone=DEFAULT_VISION_CONE, brain=None, 
+                 hidden_size=16, num_layers=1, mutation_sparsity=0.10):
+        
+        # We must override the initialization so that if no brain is provided 
+        # (e.g., generation 0), it spawns with our custom brain.
+        if brain is None:
+            brain = SparseTorchBrain(
+                input_size=self.INPUT_SIZE,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                output_size=self.OUTPUT_SIZE,
+            )
+
+        super().__init__(vision_cone=vision_cone, brain=brain, hidden_size=hidden_size, num_layers=num_layers)
+        
+        # Store the sparsity rate as a genetic trait
+        self.mutation_sparsity = mutation_sparsity
+
+    def mutate(self, mutation_rate=0.05):
+        """Overrides mutate to pass the sparsity parameter to the brain."""
+        mutated_brain = self.brain.mutate(rate=mutation_rate, sparsity=self.mutation_sparsity)
+        
+        return SparseTorchBug(
+            vision_cone=self.vision_cone,
+            brain=mutated_brain,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            mutation_sparsity=self.mutation_sparsity
+        )
+
+    def spawn_child(self, mutation_rate, other_parent=None):
+        """Overrides reproduction to ensure the child uses sparse mutation."""
+        if other_parent is not None:
+            mixed_brain = self.brain.crossover(other_parent.brain)
+        else:
+            mixed_brain = self.brain.clone()
+
+        # Apply the sparse mutation to the newly mixed brain
+        mutated_brain = mixed_brain.mutate(rate=mutation_rate, sparsity=self.mutation_sparsity)
+
+        return SparseTorchBug(
+            vision_cone=self.vision_cone,
+            brain=mutated_brain,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            mutation_sparsity=self.mutation_sparsity
+        )
+    
+    def save_to_file(self, filename):
+        """Saves the bug's configuration, sparsity rate, and brain weights to a JSON file."""
+        data = {
+            "bug_type": "TorchMutationBug",
+            "vision_cone": self.vision_cone,
+            "hidden_size": self.hidden_size,
+            "num_layers": self.num_layers,
+            "mutation_sparsity": self.mutation_sparsity,
+            "brain": self.brain.to_dict(),
+        }
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        Log.info(f"TorchMutationBug saved successfully to {filename}")
+
+    @classmethod
+    def load_from_file(cls, filename):
+        """Loads a JSON file and returns a fully reconstructed TorchMutationBug."""
+        with open(filename, 'r') as f:
+            data = json.load(f)
+
+        # Because TorchBrain.from_dict uses a @classmethod (cls), calling it 
+        # on SparseTorchBrain ensures we get a SparseTorchBrain instance back, 
+        # not a base TorchBrain.
+        brain = SparseTorchBrain.from_dict(data["brain"])
+
+        # Use .get() with defaults for backwards compatibility if you ever 
+        # load older TorchBugs into this new class.
+        return cls(
+            vision_cone=data["vision_cone"],
+            brain=brain,
+            hidden_size=data.get("hidden_size", 16),
+            num_layers=data.get("num_layers", 1),
+            mutation_sparsity=data.get("mutation_sparsity", 0.10)
+        )
