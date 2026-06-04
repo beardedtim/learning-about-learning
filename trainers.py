@@ -29,22 +29,125 @@ tmp.set_sharing_strategy('file_system')
 #
 # Brokwn out so that we can run in multiprocessing
 #
+def _serialize_bug(bug):
+    """Create a compact, JSON-serializable description of a bug instance.
+
+    The worker will use this spec to reconstruct a fresh bug instance locally.
+    """
+    spec = {
+        'class_name': bug.__class__.__name__,
+        'vision_cone': getattr(bug, 'vision_cone', None),
+        'payload': {}
+    }
+
+    # Per-class payloads
+    cls_name = spec['class_name']
+    if cls_name == 'BrainBug':
+        spec['payload']['genes'] = getattr(bug, 'genes', None)
+
+    elif cls_name in ('NeuralBug', 'MemoryBug'):
+        # Extract numpy weights into plain lists to avoid large pickles
+        brain = getattr(bug, 'brain', None)
+        if brain is not None:
+            spec['payload']['weights'] = [
+                brain.W1.tolist(), brain.b1.tolist(), brain.W2.tolist(), brain.b2.tolist()
+            ]
+        if cls_name == 'MemoryBug':
+            spec['payload']['memory_size'] = getattr(bug, 'memory_size', 4)
+
+    elif cls_name in ('TorchBug', 'SparseTorchBug'):
+        brain = getattr(bug, 'brain', None)
+        if brain is not None:
+            # TorchBrain/SparseTorchBrain provide to_dict() which is JSON-friendly
+            try:
+                spec['payload']['brain'] = brain.to_dict()
+            except Exception:
+                spec['payload']['brain'] = None
+        spec['payload']['hidden_size'] = getattr(bug, 'hidden_size', None)
+        spec['payload']['num_layers'] = getattr(bug, 'num_layers', None)
+        spec['payload']['mutation_sparsity'] = getattr(bug, 'mutation_sparsity', None)
+
+    # RandomBug/ForwardBug carry no extra data
+    return spec
+
+
+def _deserialize_bug(spec):
+    """Reconstruct a bug instance from a spec created by _serialize_bug."""
+    import bugs as bugs_module
+    cls_name = spec['class_name']
+    vision_cone = spec.get('vision_cone', None)
+    payload = spec.get('payload', {}) or {}
+
+    BugClass = getattr(bugs_module, cls_name)
+
+    if cls_name == 'BrainBug':
+        return BugClass(vision_cone=vision_cone, genes=payload.get('genes'))
+
+    elif cls_name == 'NeuralBug':
+        weights = payload.get('weights')
+        if weights:
+            import numpy as np
+            numpy_weights = (
+                np.array(weights[0], dtype=np.float32),
+                np.array(weights[1], dtype=np.float32),
+                np.array(weights[2], dtype=np.float32),
+                np.array(weights[3], dtype=np.float32),
+            )
+            from bugs import NumpyNeuralNet
+            brain = NumpyNeuralNet(input_size=17, hidden_size=12, output_size=8, weights=numpy_weights)
+            return BugClass(vision_cone=vision_cone, brain=brain)
+        return BugClass(vision_cone=vision_cone)
+
+    elif cls_name == 'MemoryBug':
+        weights = payload.get('weights')
+        mem_size = payload.get('memory_size', 4)
+        if weights:
+            import numpy as np
+            numpy_weights = (
+                np.array(weights[0], dtype=np.float32),
+                np.array(weights[1], dtype=np.float32),
+                np.array(weights[2], dtype=np.float32),
+                np.array(weights[3], dtype=np.float32),
+            )
+            from bugs import NumpyNeuralNet
+            brain = NumpyNeuralNet(input_size=17 + mem_size, hidden_size=20, output_size=8 + mem_size, weights=numpy_weights)
+            return BugClass(vision_cone=vision_cone, brain=brain, memory_size=mem_size)
+        return BugClass(vision_cone=vision_cone, memory_size=mem_size)
+
+    elif cls_name in ('TorchBug', 'SparseTorchBug'):
+        brain_dict = payload.get('brain')
+        hidden_size = payload.get('hidden_size')
+        num_layers = payload.get('num_layers')
+        if brain_dict:
+            brain = bugs_module.TorchBrain.from_dict(brain_dict)
+            return BugClass(vision_cone=vision_cone, brain=brain, hidden_size=hidden_size, num_layers=num_layers)
+        return BugClass(vision_cone=vision_cone, hidden_size=hidden_size, num_layers=num_layers)
+
+    else:
+        # RandomBug, ForwardBug, or other simple classes
+        return BugClass(vision_cone=vision_cone)
+
+
 def evaluate_single_bug_worker(args):
-    bug, trials, fitness_fn, map_layout = args
-    total_fitness = 0
-    
+    # args: (bug_spec, trials, fitness_fn, map_layout)
+    bug_spec, trials, fitness_fn, map_layout = args
+    total_fitness = 0.0
+
+    # Reconstruct the bug locally to avoid sending heavy tensors across IPC
+    bug = _deserialize_bug(bug_spec)
+
     for _ in range(trials):
         walls = generate_walls(map_layout)
         food = generate_initial_food(walls=walls, layout=map_layout)
         world = World(initial_food=food, initial_walls=walls)
-        
+
         sim = Simulation(world, bug, max_iterations=MAX_ITERATIONS, life_force=DEFAULT_LIFE_FORCE)
         results = sim.run()
-        
+
         # Pass the entire results dict to the fitness function
-        trial_score = fitness_fn(results) 
+        trial_score = fitness_fn(results)
         total_fitness += trial_score
-        
+
     return total_fitness / trials
 
 class EvolutionaryTrainer:
@@ -86,8 +189,10 @@ class EvolutionaryTrainer:
                 # 2. Evaluate Fitness via Trials
                 
                 # Pack up the arguments each CPU core needs into a tuple
+                # We serialize each bug into a lightweight spec so we don't
+                # send large torch/numpy objects through the ProcessPool.
                 worker_args = [
-                    (bug, self.trials, self.fitness_fn, self.map_layout)
+                    (_serialize_bug(bug), self.trials, self.fitness_fn, self.map_layout)
                     for bug in population
                 ]
                 

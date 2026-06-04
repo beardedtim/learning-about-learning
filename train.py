@@ -14,9 +14,9 @@ from trainers import EvolutionaryTrainer, fitness_efficiency, fitness_gluttony, 
 # POP_SIZE: number of candidates evaluated each generation.
 # MUTATION_RATE: strength of random variation applied during breeding.
 # TRIALS_PER_EPOCH: number of separate random worlds each bug plays per fitness estimate.
-GENERATIONS = 100
-POP_SIZE = 1250
-MUTATION_RATE = 0.075
+GENERATIONS = 1000
+POP_SIZE = 5000
+MUTATION_RATE = 0.1
 TRIALS_PER_EPOCH = 3
 
 if __name__ == "__main__":

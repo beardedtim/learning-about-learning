@@ -1,4 +1,7 @@
 
+from world import FOOD_CHAR
+
+
 class Simulation:
     def __init__(self, world, bug, max_iterations, life_force):
         self.world = world
@@ -33,8 +36,7 @@ class Simulation:
             turns_survived += 1
             
             # 5. React (Restore the bug's life force if it eats)
-            # Recommend importing FOOD_CHAR and using it here if move_result returns characters
-            if move_result == "food": 
+            if move_result == FOOD_CHAR:
                 self.bug.life_force = self.bug.max_life_force
                 food_collected_this_run += 1
         

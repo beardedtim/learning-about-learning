@@ -289,24 +289,31 @@ class World:
                  ):
         self.state_dict = {}
         self.player_loc = player_start
-        
+
         self.player_facing = facing 
-        
+
         self.MAX_X = max_x
         self.MAX_Y = max_y
-
-        self.state_dict[self.player_loc] = PLAYER_CHAR
 
         # --- Add the walls to the map ---
         if initial_walls:
             for wall in initial_walls:
+                # Never overwrite the player's starting cell with a wall
+                if wall == self.player_loc:
+                    continue
                 self.state_dict[wall] = WALL_CHAR
 
         if initial_food is None:
             initial_food = generate_initial_food(walls=initial_walls)
 
         for food in initial_food:
+            # Never place food on the player's starting cell or on walls
+            if food == self.player_loc or food in (initial_walls or []):
+                continue
             self.state_dict[food] = FOOD_CHAR
+
+        # Finally place the player so walls/food cannot overwrite it
+        self.state_dict[self.player_loc] = PLAYER_CHAR
 
     def draw_viewport(self, view_radius=5):
         """
@@ -323,7 +330,8 @@ class World:
             row_chars = []
 
             for x in range(p_x - view_radius, p_x + view_radius + 1):
-                if x < 0 or x > self.MAX_X or y < 0 or y > self.MAX_Y:
+                # Treat coordinates outside the playable 1 .. MAX_X-1 range as walls
+                if x <= 0 or x >= self.MAX_X or y <= 0 or y >= self.MAX_Y:
                     row_chars.append(WALL_CHAR)
                 elif (x, y) == self.player_loc:
                     row_chars.append(PLAYER_ARROWS.get(self.player_facing, PLAYER_CHAR))
@@ -347,8 +355,8 @@ class World:
             target_x = p_x + (dx * step)
             target_y = p_y + (dy * step)
             
-            # 1. Check World Bounds
-            if target_x <= 0 or target_x >= MAX_X or target_y <= 0 or target_y >= MAX_Y:
+            # 1. Check World Bounds (use instance bounds so non-default worlds work)
+            if target_x <= 0 or target_x >= self.MAX_X or target_y <= 0 or target_y >= self.MAX_Y:
                 results.append(WALL_CHAR)
                 break # Blocked by map edge
             
@@ -505,8 +513,10 @@ class World:
             
         # --- Check for food ---
         if target_content == FOOD_CHAR:
-            result = "food"
+            # Return the canonical FOOD_CHAR so callers can compare to the shared constant
+            result = FOOD_CHAR
 
+            # Replace the consumed food with a newly spawned item elsewhere
             self.spawn_food()
 
         # 6. Execute the move
