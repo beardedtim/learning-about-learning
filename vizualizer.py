@@ -291,7 +291,7 @@ def run_visualizer(filename, layout="u_trap"):
             bug.life_force -= 1
             turns_survived += 1
             
-            if move_result == "food":
+            if move_result == FOOD_CHAR:
                 food_eaten += 1
                 bug.life_force = bug.max_life_force
                 
