@@ -295,10 +295,11 @@ BaseBug
  ├── BrainBug
  ├── NeuralBug
  ├── MemoryBug
- └── TorchBug
+ ├── TorchBug
+ └── DynamicBug
 ```
 
-Each level introduces more intelligence.
+Each stage adds a new capability or representation style.
 
 ---
 
@@ -306,48 +307,68 @@ Each level introduces more intelligence.
 
 ## Purpose
 
-Baseline benchmark.
+A baseline with no learning and no long-term strategy.
 
 Behavior:
 
 ```text
 See food?
   Move toward it.
-
 Otherwise:
-  Pick random direction.
+  Pick a random direction.
 ```
 
-Useful for answering:
+Why it is useful:
 
-> Is evolution actually helping?
+- Establishes the minimum performance floor.
+- Shows whether evolution improves behavior at all.
+- Separates useful strategies from luck.
+
+How it upgrades the next bug:
+
+- The next step adds intentional rules on top of randomness.
 
 ---
 
 # ForwardBug
 
-Hand-written instinctive creature.
+## Purpose
 
-Strategy:
+A simple agent built with hand-designed instincts.
 
-```text
-Prefer food
-Keep moving forward
-Avoid walls
-Back out of traps
-```
+Behavior:
 
-Acts like a simple animal.
+- Prefer food when visible.
+- Keep moving forward when safe.
+- Avoid walls and immediate collisions.
+- Back out only when trapped.
 
-Provides a stronger baseline.
+Why it is useful:
+
+- Provides a stable, understandable baseline.
+- Demonstrates how even a few rules greatly reduce dumb mistakes.
+- Shows the limits of fixed heuristics.
+
+Upgrade from RandomBug:
+
+- Drops chance-based wandering.
+- Replaces random turns with coherent survival rules.
+- Gains consistent wall avoidance and forward momentum.
 
 ---
 
 # BrainBug
 
-First evolvable intelligence.
+## Purpose
 
-## Genome
+The first agent whose behavior is shaped by evolution rather than by fixed rules.
+
+Core idea:
+
+- Replace handcrafted thresholds with weighted preferences.
+- Let evolution tune those weights.
+
+Genome:
 
 ```python
 food_weight
@@ -355,117 +376,47 @@ wall_weight
 empty_weight
 ```
 
-Example:
+Decision process:
 
-```python
-{
-    "food_weight": 0.8,
-    "wall_weight": -0.4,
-    "empty_weight": 0.1
-}
-```
+- Score each direction based on nearby food, walls, and empty space.
+- Closer food boosts the score.
+- Walls reduce it.
+- Empty space provides a small bias.
+- Choose the direction with the highest score.
 
----
+Why it is useful:
 
-## Decision Process
+- Introduces evolvable parameters.
+- Keeps the model simple enough to inspect.
+- Converts rule design into weight search.
 
-Each direction receives a score.
+Upgrade from ForwardBug:
 
-Food:
-
-```text
-positive
-```
-
-Walls:
-
-```text
-negative
-```
-
-Empty space:
-
-```text
-small bias
-```
-
-Highest score wins.
-
----
-
-## Evolution
-
-Mutation alters weights:
-
-```python
-weight += random_noise
-```
-
-This is essentially a tiny evolved utility function.
+- Moves from human-coded instincts to learned behavior.
+- Lets evolution discover the right tradeoffs instead of hardcoding them.
+- Still retains interpretable decision logic.
 
 ---
 
 # NeuralBug
 
-First true neural network agent.
+## Purpose
 
----
+The first bug with a true neural network brain.
 
-## Inputs
+What changed:
 
-17 values.
+- Introduces a hidden layer.
+- Learns nonlinear combinations of inputs.
+- Can discover richer strategies than BrainBug.
 
-### Food Signals
+Inputs (17 total):
 
-8 values.
+- 8 food proximity values
+- 8 wall/contact values
+- 1 normalized hunger value
 
-One per direction.
-
-```text
-1 / distance_to_food
-```
-
-Example:
-
-```python
-0.5
-```
-
-means food is two tiles away.
-
----
-
-### Wall Signals
-
-8 values.
-
-```python
-1.0
-```
-
-means wall adjacent.
-
-```python
-0.0
-```
-
-means clear.
-
----
-
-### Hunger Signal
-
-1 value.
-
-```python
-life_force / max_life_force
-```
-
-Represents urgency.
-
----
-
-## Architecture
+Architecture:
 
 ```text
 17 Inputs
@@ -475,89 +426,76 @@ Represents urgency.
 8 Outputs
 ```
 
-Outputs correspond directly to movement choices.
-
----
-
-## Action Selection
+Action selection:
 
 ```python
 argmax(outputs)
 ```
 
-Highest score wins.
+Why it is useful:
+
+- Learns more complex sensor-action relationships.
+- Can respond differently in different contexts.
+- Allows hidden representations instead of direct scoring.
+
+Upgrade from BrainBug:
+
+- Moves beyond a linear utility function.
+- Can represent nonlinear strategies such as "avoid wall if hungry, otherwise seek food".
+- Learns richer feature combinations from perception.
 
 ---
 
 # MemoryBug
 
-Problem:
+## Purpose
 
-Feedforward networks have no memory.
+Give the bug a short-term memory buffer.
 
-They react only to the current frame.
+Problem solved:
 
----
+- Feedforward networks only use the current instant.
+- Navigation often requires remembering recent actions.
 
-## Solution
+How it works:
 
-Add a memory vector.
+- The network receives standard sensory inputs plus a small memory vector from the previous turn.
+- It outputs both movement scores and new memory values.
 
-Input:
-
-```text
-17 sensory values
-+
-4 memory values
-```
-
-Output:
+I/O structure:
 
 ```text
-8 movement scores
-+
-4 new memory values
+Inputs:  17 sensory values + 4 memory values
+Outputs: 8 movement scores + 4 new memory values
 ```
 
-The network effectively writes notes to itself.
+Why it is useful:
 
----
+- Enables simple temporal reasoning.
+- Helps the bug avoid repeating previous mistakes.
+- Supports path-dependent strategies without a full recurrent unit.
 
-## Why This Matters
+Upgrade from NeuralBug:
 
-MemoryBug can theoretically learn:
-
-```text
-I already explored this hallway.
-```
-
-or
-
-```text
-I turned left three turns ago.
-```
-
-without explicit programming.
-
-This is a primitive recurrent network.
+- Adds state over time instead of reacting only to the current frame.
+- Allows learned short-term context.
+- Improves performance on dead-end and loop-heavy maps.
 
 ---
 
 # TorchBug
 
-Most sophisticated agent.
+## Purpose
 
----
+Use a true recurrent neural network for memory.
 
-## Motivation
+What changed:
 
-MemoryBug manually feeds memory back.
+- Replaces manual memory feedback with a GRU.
+- Hidden state flows naturally across turns.
+- The brain learns temporal patterns directly.
 
-TorchBug uses a real recurrent architecture.
-
----
-
-## Architecture
+Architecture:
 
 ```text
 Inputs
@@ -569,38 +507,43 @@ Linear Layer
 Action Scores
 ```
 
----
+Why it is useful:
 
-## GRU Hidden State
+- Supports richer sequence-based behavior.
+- Avoids handcrafting memory vector mechanics.
+- Internalizes temporal context in the recurrent state.
 
-The hidden state persists between turns.
+Upgrade from MemoryBug:
 
-This gives the agent:
-
-```text
-Short-term memory
-Context
-Temporal reasoning
-```
-
-without manually managing memory vectors.
+- Moves from explicit memory feedback to learned recurrence.
+- Lets the brain decide what history is useful.
+- Handles longer temporal dependencies more naturally.
 
 ---
 
-## Evolution Strategy
+# DynamicBug
 
-TorchBug is not trained with backpropagation.
+## Purpose
 
-Instead:
+Evolve the brain architecture itself, not just its weights.
 
-```text
-Random initialization
-Mutation
-Selection
-Crossover
-```
+What changed:
 
-All GRU weights evolve genetically.
+- Hidden neurons can be added or removed.
+- Connections can be added, removed, or toggled.
+- Both structure and weights are subject to mutation and crossover.
+
+Why it is useful:
+
+- Enables architecture search inside evolution.
+- Lets complexity grow only when helpful.
+- Can discover novel topologies for the task.
+
+Upgrade from TorchBug:
+
+- Adds structural evolution on top of recurrent learning.
+- Lets the brain adapt its own capacity and wiring.
+- Bridges fixed-model neuroevolution and topology evolution.
 
 ---
 
@@ -944,13 +887,14 @@ TorchBug
 
 Each rung answers a different research question:
 
-| Bug        | Question                                     |
-| ---------- | -------------------------------------------- |
-| RandomBug  | Is any behavior better than chance?          |
-| ForwardBug | How far do instincts get us?                 |
-| BrainBug   | Can simple weights evolve useful strategies? |
-| NeuralBug  | Can reactive neural intelligence emerge?     |
-| MemoryBug  | Does explicit memory improve survival?       |
-| TorchBug   | Can recurrent memory evolve naturally?       |
+| Bug        | Question                                      |
+| ---------- | --------------------------------------------- |
+| RandomBug  | Is any behavior better than chance?           |
+| ForwardBug | How far do instincts get us?                  |
+| BrainBug   | Can simple weights evolve useful strategies?  |
+| NeuralBug  | Can reactive neural intelligence emerge?      |
+| MemoryBug  | Does explicit memory improve survival?        |
+| TorchBug   | Can recurrent memory evolve naturally?        |
+| DynamicBug | Can evolving topology discover better brains? |
 
 ---

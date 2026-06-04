@@ -67,6 +67,11 @@ def _serialize_bug(bug):
         spec['payload']['num_layers'] = getattr(bug, 'num_layers', None)
         spec['payload']['mutation_sparsity'] = getattr(bug, 'mutation_sparsity', None)
 
+    elif cls_name == 'DynamicBug':
+        brain = getattr(bug, 'brain', None)
+        if brain is not None:
+            spec['payload']['brain'] = brain.to_dict()
+
     # RandomBug/ForwardBug carry no extra data
     return spec
 
@@ -122,6 +127,13 @@ def _deserialize_bug(spec):
             brain = bugs_module.TorchBrain.from_dict(brain_dict)
             return BugClass(vision_cone=vision_cone, brain=brain, hidden_size=hidden_size, num_layers=num_layers)
         return BugClass(vision_cone=vision_cone, hidden_size=hidden_size, num_layers=num_layers)
+
+    elif cls_name == 'DynamicBug':
+        brain_dict = payload.get('brain')
+        if brain_dict:
+            brain = bugs_module.DynamicNeuralNet.from_dict(brain_dict)
+            return BugClass(vision_cone=vision_cone, brain=brain)
+        return BugClass(vision_cone=vision_cone)
 
     else:
         # RandomBug, ForwardBug, or other simple classes

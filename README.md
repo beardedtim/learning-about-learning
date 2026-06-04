@@ -24,7 +24,7 @@ The primary objective is survival, but "winning" can be defined in multiple ways
 
 ## Local Usage & API
 
-The simulation uses a unified `EvolutionaryTrainer` API, making it incredibly simple to test different bug architectures (`BrainBug`, `NeuralBug`), vision cones, and fitness functions locally.
+The simulation uses a unified `EvolutionaryTrainer` API, making it incredibly simple to test different bug architectures (`BrainBug`, `NeuralBug`, `DynamicBug`), vision cones, and fitness functions locally.
 
 ### 1. Training a New Population
 

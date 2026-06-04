@@ -1,6 +1,6 @@
 import os
 from log import Log
-from bugs import VISION_CONES, MemoryBug, NeuralBug, SparseTorchBug, TorchBug
+from bugs import VISION_CONES, MemoryBug, NeuralBug, SparseTorchBug, TorchBug, DynamicBug
 from trainers import EvolutionaryTrainer, fitness_efficiency, fitness_gluttony, fitness_longevity, fitness_speed_raider
 
 #
@@ -104,6 +104,23 @@ if __name__ == "__main__":
                 
                 best_sparse = trainer_sparse.train()
                 best_sparse.save_to_file(sparsetorch_path)
+
+            dynamic_path = f"bug_saves/dynamic-{name}-{fitness_fn.__name__}-{MAP_CREATION_TYPE}.json"
+            if not os.path.exists(dynamic_path):
+                trainer_dynamic = EvolutionaryTrainer(
+                    bug_class=DynamicBug,
+                    vision_cone=vision,
+                    fitness_fn=fitness_fn,
+                    generations=GENERATIONS,
+                    population_size=POP_SIZE,
+                    mutation_rate=MUTATION_RATE,
+                    map_layout=MAP_CREATION_TYPE,
+                    trials=TRIALS_PER_EPOCH,
+                    name="Dynamic"
+                )
+
+                best_dynamic = trainer_dynamic.train()
+                best_dynamic.save_to_file(dynamic_path)
 
             print("")
             print("")

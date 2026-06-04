@@ -527,6 +527,398 @@ class NeuralBug(BaseBug):
         )
 
 
+class DynamicNeuralNet:
+    """A dynamically growing brain architecture inspired by NEAT-like topology evolution.
+
+    This brain is not a fixed MLP. Instead it stores:
+    - `hidden_nodes`: a list of intermediate neurons with individual bias values
+    - `connections`: sparse directed edges between inputs, hidden nodes, and outputs
+    - `output_biases`: output neuron biases
+
+    During evolution, the network can mutate its weights, add/remove hidden nodes,
+    toggle connections, and grow new topology over generations.
+    """
+    def __init__(self, input_size, output_size, hidden_nodes=None,
+                 output_biases=None, connections=None):
+        self.input_size = input_size
+        self.output_size = output_size
+        self.hidden_nodes = hidden_nodes if hidden_nodes is not None else []
+        self.output_biases = output_biases if output_biases is not None else [random.uniform(-1.0, 1.0) for _ in range(output_size)]
+        self.connections = connections if connections is not None else []
+
+        # If this is a fresh brain, initialize a small random topology.
+        if not self.hidden_nodes and not self.connections:
+            self._initialize_random_structure()
+
+        # Remove any invalid or stale connections coming from crossovers or load-time data.
+        self._sanitize_connections()
+
+    def _initialize_random_structure(self):
+        # Start with a small number of hidden neurons and random biases.
+        num_hidden = random.randint(2, 4)
+        self.hidden_nodes = [{"bias": random.uniform(-1.0, 1.0)} for _ in range(num_hidden)]
+        self.output_biases = [random.uniform(-1.0, 1.0) for _ in range(self.output_size)]
+        self.connections = []
+
+        # Connect each hidden neuron from a random subset of valid upstream sources.
+        # Hidden nodes may depend on inputs and earlier hidden nodes only, ensuring a
+        # feed-forward ordering during evaluation.
+        for hidden_index in range(len(self.hidden_nodes)):
+            target = ("hidden", hidden_index)
+            source_choices = [("input", i) for i in range(self.input_size)] + [("hidden", i) for i in range(hidden_index)]
+            num_sources = random.randint(1, max(1, min(len(source_choices), 3)))
+            for source in random.sample(source_choices, num_sources):
+                self.connections.append({
+                    "source_type": source[0],
+                    "source_index": source[1],
+                    "target_type": target[0],
+                    "target_index": target[1],
+                    "weight": random.uniform(-1.0, 1.0),
+                    "enabled": True,
+                })
+
+        # Connect outputs from a random set of inputs and hidden neurons.
+        # This allows the network to combine direct perception with learned hidden features.
+        for output_index in range(self.output_size):
+            target = ("output", output_index)
+            source_choices = [("input", i) for i in range(self.input_size)] + [("hidden", i) for i in range(len(self.hidden_nodes))]
+            num_sources = random.randint(2, max(2, min(len(source_choices), 5)))
+            for source in random.sample(source_choices, num_sources):
+                self.connections.append({
+                    "source_type": source[0],
+                    "source_index": source[1],
+                    "target_type": target[0],
+                    "target_index": target[1],
+                    "weight": random.uniform(-1.0, 1.0),
+                    "enabled": True,
+                })
+
+    def clone(self):
+        return copy.deepcopy(self)
+
+    def forward(self, inputs):
+        if len(inputs) != self.input_size:
+            raise ValueError(f"Expected {self.input_size} inputs, got {len(inputs)}")
+
+        # Store all known values in a keyed map: inputs first, then hidden activations.
+        values = {
+            ("input", idx): float(inputs[idx])
+            for idx in range(self.input_size)
+        }
+
+        # Evaluate hidden neurons in sequence. Hidden nodes accumulate weighted
+        # signals from allowed sources and apply a tanh nonlinearity.
+        for hidden_index, hidden_node in enumerate(self.hidden_nodes):
+            total = hidden_node["bias"]
+            for conn in self.connections:
+                if not conn["enabled"] or conn["target_type"] != "hidden" or conn["target_index"] != hidden_index:
+                    continue
+                source_key = (conn["source_type"], conn["source_index"])
+                source_value = values.get(source_key, 0.0)
+                total += conn["weight"] * source_value
+            values[("hidden", hidden_index)] = np.tanh(total)
+
+        # Compute each output score from its incoming connections.
+        outputs = []
+        for output_index in range(self.output_size):
+            total = self.output_biases[output_index]
+            for conn in self.connections:
+                if not conn["enabled"] or conn["target_type"] != "output" or conn["target_index"] != output_index:
+                    continue
+                source_key = (conn["source_type"], conn["source_index"])
+                source_value = values.get(source_key, 0.0)
+                total += conn["weight"] * source_value
+            outputs.append(np.tanh(total))
+
+        return outputs
+
+    def _connection_exists(self, source, target):
+        return any(
+            conn["source_type"] == source[0] and conn["source_index"] == source[1] and
+            conn["target_type"] == target[0] and conn["target_index"] == target[1]
+            for conn in self.connections
+        )
+
+    def _possible_sources(self, target):
+        if target[0] == "hidden":
+            return [("input", i) for i in range(self.input_size)] + [("hidden", i) for i in range(target[1])]
+        return [("input", i) for i in range(self.input_size)] + [("hidden", i) for i in range(len(self.hidden_nodes))]
+
+    def _sanitize_connections(self):
+        valid_connections = []
+        for conn in self.connections:
+            source_type = conn.get("source_type")
+            source_index = conn.get("source_index")
+            target_type = conn.get("target_type")
+            target_index = conn.get("target_index")
+
+            if source_type == "input":
+                if not 0 <= source_index < self.input_size:
+                    continue
+            elif source_type == "hidden":
+                if not 0 <= source_index < len(self.hidden_nodes):
+                    continue
+            else:
+                continue
+
+            if target_type == "hidden":
+                if not 0 <= target_index < len(self.hidden_nodes):
+                    continue
+            elif target_type == "output":
+                if not 0 <= target_index < self.output_size:
+                    continue
+            else:
+                continue
+
+            valid_connections.append(conn)
+
+        self.connections = valid_connections
+
+    def _add_random_connection(self):
+        possible_targets = [("hidden", i) for i in range(len(self.hidden_nodes))] + [("output", i) for i in range(self.output_size)]
+        random.shuffle(possible_targets)
+
+        for target in possible_targets:
+            sources = self._possible_sources(target)
+            random.shuffle(sources)
+            for source in sources:
+                if source == target or self._connection_exists(source, target):
+                    continue
+                self.connections.append({
+                    "source_type": source[0],
+                    "source_index": source[1],
+                    "target_type": target[0],
+                    "target_index": target[1],
+                    "weight": random.uniform(-1.0, 1.0),
+                    "enabled": True,
+                })
+                return
+
+    def _add_hidden_node(self):
+        new_bias = random.uniform(-1.0, 1.0)
+        self.hidden_nodes.append({"bias": new_bias})
+        new_hidden_index = len(self.hidden_nodes) - 1
+
+        for _ in range(random.randint(1, 3)):
+            source = random.choice([("input", i) for i in range(self.input_size)])
+            self.connections.append({
+                "source_type": source[0],
+                "source_index": source[1],
+                "target_type": "hidden",
+                "target_index": new_hidden_index,
+                "weight": random.uniform(-1.0, 1.0),
+                "enabled": True,
+            })
+
+        for _ in range(random.randint(1, 3)):
+            target = ("output", random.randrange(self.output_size))
+            self.connections.append({
+                "source_type": "hidden",
+                "source_index": new_hidden_index,
+                "target_type": target[0],
+                "target_index": target[1],
+                "weight": random.uniform(-1.0, 1.0),
+                "enabled": True,
+            })
+
+    def _remove_hidden_node(self):
+        if len(self.hidden_nodes) <= 1:
+            return
+
+        remove_index = random.randrange(len(self.hidden_nodes))
+        self.hidden_nodes.pop(remove_index)
+
+        new_connections = []
+        for conn in self.connections:
+            if conn["source_type"] == "hidden" and conn["source_index"] == remove_index:
+                continue
+            if conn["target_type"] == "hidden" and conn["target_index"] == remove_index:
+                continue
+            if conn["source_type"] == "hidden" and conn["source_index"] > remove_index:
+                conn["source_index"] -= 1
+            if conn["target_type"] == "hidden" and conn["target_index"] > remove_index:
+                conn["target_index"] -= 1
+            new_connections.append(conn)
+
+        self.connections = new_connections
+
+    def mutate(self, rate=0.05, add_node_prob=0.06, add_conn_prob=0.10,
+               remove_node_prob=0.03, toggle_conn_prob=0.05):
+        # Clone the topology, then apply both weight and structural mutations.
+        child = self.clone()
+
+        # Perturb hidden neuron biases.
+        for hidden_node in child.hidden_nodes:
+            hidden_node["bias"] += random.uniform(-rate, rate)
+
+        # Perturb output biases.
+        for i in range(len(child.output_biases)):
+            child.output_biases[i] += random.uniform(-rate, rate)
+
+        # Perturb existing connection weights and occasionally toggle them on/off.
+        for conn in child.connections:
+            if random.random() < rate:
+                conn["weight"] += random.uniform(-rate, rate)
+            if random.random() < toggle_conn_prob:
+                conn["enabled"] = not conn["enabled"]
+
+        # Add or remove topology elements to allow evolutionary growth.
+        if random.random() < add_conn_prob:
+            child._add_random_connection()
+
+        if random.random() < add_node_prob:
+            child._add_hidden_node()
+
+        if random.random() < remove_node_prob:
+            child._remove_hidden_node()
+
+        return child
+
+    def crossover(self, other_parent_brain):
+        # Combine hidden node structure and biases from both parents.
+        hidden_count = random.choice([len(self.hidden_nodes), len(other_parent_brain.hidden_nodes)])
+        hidden_nodes = []
+        for i in range(hidden_count):
+            if i < len(self.hidden_nodes) and i < len(other_parent_brain.hidden_nodes):
+                chosen = random.choice([self.hidden_nodes[i], other_parent_brain.hidden_nodes[i]])
+            elif i < len(self.hidden_nodes):
+                chosen = self.hidden_nodes[i]
+            else:
+                chosen = other_parent_brain.hidden_nodes[i]
+            hidden_nodes.append({"bias": chosen["bias"]})
+
+        # Combine output biases element-wise from both parents.
+        output_biases = []
+        for i in range(self.output_size):
+            if i < len(self.output_biases) and i < len(other_parent_brain.output_biases):
+                output_biases.append(random.choice([self.output_biases[i], other_parent_brain.output_biases[i]]))
+            elif i < len(self.output_biases):
+                output_biases.append(self.output_biases[i])
+            else:
+                output_biases.append(other_parent_brain.output_biases[i])
+
+        # Merge connections by unique key, favoring one parent or the other.
+        connection_pool = {}
+        for parent in (self, other_parent_brain):
+            for conn in parent.connections:
+                key = (
+                    conn["source_type"], conn["source_index"],
+                    conn["target_type"], conn["target_index"],
+                )
+                if key not in connection_pool or random.random() < 0.5:
+                    connection_pool[key] = dict(conn)
+
+        connections = list(connection_pool.values())
+
+        child = DynamicNeuralNet(
+            input_size=self.input_size,
+            output_size=self.output_size,
+            hidden_nodes=hidden_nodes,
+            output_biases=output_biases,
+            connections=connections,
+        )
+
+        return child
+
+    def to_dict(self):
+        return {
+            "input_size": self.input_size,
+            "output_size": self.output_size,
+            "hidden_nodes": self.hidden_nodes,
+            "output_biases": self.output_biases,
+            "connections": self.connections,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            input_size=data["input_size"],
+            output_size=data["output_size"],
+            hidden_nodes=data["hidden_nodes"],
+            output_biases=data["output_biases"],
+            connections=data["connections"],
+        )
+
+
+class DynamicBug(BaseBug):
+    """A bug whose decision-making brain can evolve both weights and topology.
+
+    DynamicBug converts sensory perception into an input vector, feeds it into a
+    variable-topology `DynamicNeuralNet`, and chooses the highest-scoring relative
+    movement direction. Its brain can grow or shrink hidden neurons over generations,
+    making it more flexible than the fixed-size `NeuralBug`.
+    """
+    def __init__(self, vision_cone, brain=None):
+        super().__init__(vision_cone)
+        self.directions = [
+            "forward", "forward_left", "forward_right",
+            "left", "right",
+            "back_left", "back_right", "back"
+        ]
+        self.brain = brain if brain is not None else DynamicNeuralNet(input_size=17, output_size=8)
+
+    def request_action(self, perception):
+        food_inputs = []
+        wall_inputs = []
+
+        for direction in self.directions:
+            view = perception.get(direction, [])
+            food_score = 0.0
+            wall_score = 0.0
+
+            for distance_index, tile in enumerate(view):
+                distance = distance_index + 1
+                if tile == FOOD_CHAR and food_score == 0:
+                    food_score = 1.0 / distance
+                if tile == WALL_CHAR:
+                    if distance == 1:
+                        wall_score = 1.0
+                    break
+
+            food_inputs.append(food_score)
+            wall_inputs.append(wall_score)
+
+        current_life = getattr(self, 'life_force', 100)
+        max_life = getattr(self, 'max_life_force', 100)
+        normalized_hunger = current_life / max_life
+
+        inputs = food_inputs + wall_inputs + [normalized_hunger]
+        outputs = self.brain.forward(inputs)
+
+        best_index = outputs.index(max(outputs))
+        self.last_action_scores = outputs
+        self.last_perception = perception
+
+        return self.directions[best_index]
+
+    def spawn_child(self, mutation_rate, other_parent=None):
+        if other_parent is not None:
+            mixed_brain = self.brain.crossover(other_parent.brain)
+        else:
+            mixed_brain = self.brain.clone()
+
+        mutated_brain = mixed_brain.mutate(rate=mutation_rate)
+        return DynamicBug(vision_cone=self.vision_cone, brain=mutated_brain)
+
+    def save_to_file(self, filename):
+        data = {
+            "bug_type": "DynamicBug",
+            "vision_cone": self.vision_cone,
+            "brain": self.brain.to_dict(),
+        }
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        Log.info(f"DynamicBug saved successfully to {filename}")
+
+    @classmethod
+    def load_from_file(cls, filename):
+        with open(filename, 'r') as f:
+            data = json.load(f)
+
+        brain = DynamicNeuralNet.from_dict(data["brain"])
+        return cls(vision_cone=data["vision_cone"], brain=brain)
+
+
 class MemoryBug(BaseBug):
     """
     A NeuralBug extension with a recurrent memory vector.
@@ -890,7 +1282,7 @@ class TorchBug(BaseBug):
  
     Hyperparameters
     ───────────────
-    hidden_size : width of GRU layers (default 32)
+    hidden_size : width of GRU layers (default 8)
     num_layers  : depth of GRU stack  (default 2)
     """
  
