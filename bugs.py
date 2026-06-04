@@ -908,7 +908,7 @@ class TorchBug(BaseBug):
         self.__dict__.update(state)
 
     def __init__(self, vision_cone=DEFAULT_VISION_CONE, brain=None,
-                 hidden_size=16, num_layers=2):
+                 hidden_size=8, num_layers=2):
         super().__init__(vision_cone)
  
         self.directions = [

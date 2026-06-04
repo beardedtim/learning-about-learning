@@ -5,7 +5,7 @@ import os
 import uuid
 
 from bugs import (
-    MemoryBug, NeuralBug, BrainBug, TorchBug,
+    MemoryBug, NeuralBug, BrainBug, TorchBug, SparseTorchBug
 )
 
 from world import (
@@ -211,6 +211,8 @@ def run_visualizer(filename, layout="u_trap"):
             bug = BrainBug.load_from_file(filename)
         elif bug_type == "TorchBug":
             bug = TorchBug.load_from_file(filename)
+        elif bug_type == "TorchMutationBug":
+            bug = SparseTorchBug.load_from_file(filename)
         else:
             print(f"Unknown bug type in JSON: {bug_type}")
             sys.exit()
@@ -334,4 +336,4 @@ def run_visualizer(filename, layout="u_trap"):
     pygame.quit()
      
 if __name__ == "__main__":
-    run_visualizer("bug_saves/neural-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")
+    run_visualizer("bug_saves/sparsetorch-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")
