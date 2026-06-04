@@ -4,14 +4,15 @@ import json
 import numpy as np
 import concurrent.futures
 import os
+
+import torch
+import torch.nn as nn
+import copy
+import torch.multiprocessing as tmp
+
 #
 # DEFAULTS
 #
-
-# A legacy training parameter for epoch-based experiments.
-# NOTE: this is defined for compatibility but is not currently used by the
-# active training loop in this file.
-NUM_EPOCHS = 250
 
 # Coordinate system and world bounds:
 # - (0, 0) is the top-left corner of the map.
@@ -283,8 +284,8 @@ MAX_ITERATIONS = 10000
 # POP_SIZE: number of candidates evaluated each generation.
 # MUTATION_RATE: strength of random variation applied during breeding.
 # TRIALS_PER_EPOCH: number of separate random worlds each bug plays per fitness estimate.
-GENERATIONS = 250
-POP_SIZE = 5000
+GENERATIONS = 100
+POP_SIZE = 1250
 MUTATION_RATE = 0.075
 TRIALS_PER_EPOCH = 5
 
@@ -1217,6 +1218,302 @@ class MemoryBug(BaseBug):
             memory_size=data.get("memory_size", 4)
         )
 
+
+# ───────────────────────────────────────────────────────────────────────────────
+# TorchBrain
+# ───────────────────────────────────────────────────────────────────────────────
+ 
+class TorchBrain(nn.Module):
+    """
+    A multi-layer GRU brain for TorchBug.
+ 
+    Architecture
+    ────────────
+    Input  → GRU (N layers, hidden_size units) → Linear head → 8 action logits
+ 
+    The GRU hidden state carries memory across turns automatically.
+    No manual memory feedback vector needed — that's the whole point.
+ 
+    Parameters
+    ──────────
+    input_size  : number of floats in the per-turn perception vector (default 17)
+    hidden_size : width of each GRU layer
+    num_layers  : depth of the GRU stack (2 is a good starting point)
+    output_size : number of movement choices (always 8 to match RELATIVE_DIRECTIONS)
+    """
+    def __init__(self, input_size=17, hidden_size=32, num_layers=2, output_size=8):
+        super().__init__()
+        self.input_size  = input_size
+        self.hidden_size = hidden_size
+        self.num_layers  = num_layers
+        self.output_size = output_size
+ 
+        self.gru  = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.head = nn.Linear(hidden_size, output_size)
+    
+    def __getstate__(self):
+        return self.to_dict()
+
+    def __setstate__(self, state):
+        self.__init__(
+            input_size  = state['input_size'],
+            hidden_size = state['hidden_size'],
+            num_layers  = state['num_layers'],
+            output_size = state['output_size'],
+        )
+        sd = {k: torch.tensor(v) for k, v in state['state_dict'].items()}
+        self.load_state_dict(sd)
+
+    def forward(self, x, hidden=None):
+        """
+        x      : (input_size,) float tensor — one turn's perception
+        hidden : GRU hidden state from the previous turn, or None to start fresh
+ 
+        Returns
+        ───────
+        logits : (output_size,) float tensor — raw action scores
+        hidden : updated hidden state to pass in next turn
+        """
+        # GRU expects (batch, seq, features) — we treat one turn as a sequence of 1
+        out, hidden = self.gru(x.view(1, 1, -1), hidden)
+        logits = self.head(out.squeeze())   # (output_size,)
+        return logits, hidden
+ 
+    # ── Evolutionary operators ─────────────────────────────────────────────────
+ 
+    def clone(self):
+        """Returns a deep copy of this brain with identical weights."""
+        return copy.deepcopy(self)
+ 
+    def mutate(self, rate=0.05):
+        """
+        Returns a new TorchBrain with Gaussian noise added to every parameter.
+        'rate' is the std-dev of the noise — equivalent to mutation_rate elsewhere.
+        """
+        child = self.clone()
+        with torch.no_grad():
+            for param in child.parameters():
+                param.add_(torch.randn_like(param) * rate)
+        return child
+ 
+    def crossover(self, other):
+        """
+        Returns a new TorchBrain by flipping a coin for each *parameter tensor*
+        (not each weight individually, which keeps layer structure coherent).
+        Then mutates the result slightly.
+        """
+        child = self.clone()
+        with torch.no_grad():
+            for p_child, p_other in zip(child.parameters(), other.parameters()):
+                if random.random() > 0.5:
+                    p_child.copy_(p_other)
+        return child
+ 
+    # ── Persistence ───────────────────────────────────────────────────────────
+ 
+    def to_dict(self):
+        """Serialises weights to plain Python lists so they can be JSON-dumped."""
+        return {
+            "input_size":  self.input_size,
+            "hidden_size": self.hidden_size,
+            "num_layers":  self.num_layers,
+            "output_size": self.output_size,
+            "state_dict":  {k: v.tolist() for k, v in self.state_dict().items()}
+        }
+ 
+    @classmethod
+    def from_dict(cls, d):
+        """Reconstructs a TorchBrain from the dict produced by to_dict()."""
+        brain = cls(
+            input_size  = d["input_size"],
+            hidden_size = d["hidden_size"],
+            num_layers  = d["num_layers"],
+            output_size = d["output_size"],
+        )
+        state = {k: torch.tensor(v) for k, v in d["state_dict"].items()}
+        brain.load_state_dict(state)
+        return brain
+ 
+
+class TorchBug(BaseBug):
+    """
+    A bug driven by a multi-layer GRU (TorchBrain).
+ 
+    Input vector layout (17 floats, same as NeuralBug):
+    ────────────────────────────────────────────────────
+      [0:8]  food proximity scores  (1/distance, 0 if none seen)
+      [8:16] wall indicators        (1.0 if wall is touching, else 0)
+      [16]   normalised life force  (life_force / max_life_force)
+ 
+    The GRU hidden state replaces the hand-rolled memory vector from MemoryBug.
+    Hidden state is reset at the start of each simulation via reset_memory().
+ 
+    Hyperparameters
+    ───────────────
+    hidden_size : width of GRU layers (default 32)
+    num_layers  : depth of GRU stack  (default 2)
+    """
+ 
+    INPUT_SIZE  = 17
+    OUTPUT_SIZE = 8   # one score per relative direction
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Serialize brain to plain dicts/lists instead of live tensors
+        state['brain'] = self.brain.to_dict()
+        state['_hidden'] = None  # never pickle hidden state
+        return state
+    
+    def __setstate__(self, state):
+        state['brain'] = TorchBrain.from_dict(state['brain'])
+        self.__dict__.update(state)
+
+    def __init__(self, vision_cone=DEFAULT_VISION_CONE, brain=None,
+                 hidden_size=32, num_layers=2):
+        super().__init__(vision_cone)
+ 
+        self.directions = [
+            "forward", "forward_left", "forward_right",
+            "left", "right",
+            "back_left", "back_right", "back"
+        ]
+ 
+        self.hidden_size = hidden_size
+        self.num_layers  = num_layers
+ 
+        if brain is None:
+            self.brain = TorchBrain(
+                input_size  = self.INPUT_SIZE,
+                hidden_size = hidden_size,
+                num_layers  = num_layers,
+                output_size = self.OUTPUT_SIZE,
+            )
+        else:
+            self.brain = brain
+ 
+        # Hidden state — reset between simulations
+        self._hidden = None
+ 
+    # ── Simulation interface ───────────────────────────────────────────────────
+ 
+    def reset_memory(self):
+        """
+        Called by Simulation.run() before each trial.
+        Wipes the GRU hidden state so every run starts from a blank slate.
+        """
+        self._hidden = None
+ 
+    def _build_input(self, perception):
+        """Converts a perception dict into a (17,) float32 tensor."""
+        food_inputs = []
+        wall_inputs = []
+ 
+        for direction in self.directions:
+            view       = perception.get(direction, [])
+            food_score = 0.0
+            wall_score = 0.0
+ 
+            for distance_index, tile in enumerate(view):
+                distance = distance_index + 1
+ 
+                if tile == FOOD_CHAR and food_score == 0:
+                    food_score = 1.0 / distance
+ 
+                if tile == WALL_CHAR:
+                    if distance == 1:
+                        wall_score = 1.0
+                    break   # can't see past a wall
+ 
+            food_inputs.append(food_score)
+            wall_inputs.append(wall_score)
+ 
+        current_life       = getattr(self, 'life_force', 100)
+        max_life           = getattr(self, 'max_life_force', 100)
+        normalised_hunger  = current_life / max_life
+ 
+        raw = food_inputs + wall_inputs + [normalised_hunger]
+        return torch.tensor(raw, dtype=torch.float32)
+ 
+    def request_action(self, perception):
+        """
+        Builds the input vector, steps the GRU forward by one turn,
+        and returns the direction with the highest output score.
+        """
+        x = self._build_input(perception)
+ 
+        with torch.no_grad():
+            logits, self._hidden = self.brain(x, self._hidden)
+ 
+        best_index = logits.argmax().item()
+ 
+        # Store for debugging / visualisation
+        self.last_action_scores = logits.tolist()
+        self.last_perception    = perception
+ 
+        return self.directions[best_index]
+ 
+    # ── Evolutionary operators ─────────────────────────────────────────────────
+ 
+    def mutate(self, mutation_rate=0.05):
+        """Returns a new TorchBug with a mutated copy of this brain."""
+        mutated_brain = self.brain.mutate(rate=mutation_rate)
+        return TorchBug(
+            vision_cone = self.vision_cone,
+            brain       = mutated_brain,
+            hidden_size = self.hidden_size,
+            num_layers  = self.num_layers,
+        )
+ 
+    def spawn_child(self, mutation_rate, other_parent=None):
+        """
+        Produces an offspring TorchBug.
+        With a second parent: crossover then mutate.
+        Without: clone then mutate (asexual fallback).
+        """
+        if other_parent is not None:
+            mixed_brain = self.brain.crossover(other_parent.brain)
+        else:
+            mixed_brain = self.brain.clone()
+ 
+        mutated_brain = mixed_brain.mutate(rate=mutation_rate)
+ 
+        return TorchBug(
+            vision_cone = self.vision_cone,
+            brain       = mutated_brain,
+            hidden_size = self.hidden_size,
+            num_layers  = self.num_layers,
+        )
+ 
+    # ── Persistence ───────────────────────────────────────────────────────────
+ 
+    def save_to_file(self, filename):
+        """Saves the bug's vision cone and brain weights to a JSON file."""
+        data = {
+            "bug_type":    "TorchBug",
+            "vision_cone": self.vision_cone,
+            "hidden_size": self.hidden_size,
+            "num_layers":  self.num_layers,
+            "brain":       self.brain.to_dict(),
+        }
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+ 
+    @classmethod
+    def load_from_file(cls, filename):
+        """Loads a JSON file and returns a fully reconstructed TorchBug."""
+        with open(filename, 'r') as f:
+            data = json.load(f)
+ 
+        brain = TorchBrain.from_dict(data["brain"])
+ 
+        return cls(
+            vision_cone = data["vision_cone"],
+            brain       = brain,
+            hidden_size = data["hidden_size"],
+            num_layers  = data["num_layers"],
+        )
+ 
+
+
 class Simulation:
     def __init__(self, world, bug, max_iterations=MAX_ITERATIONS, life_force=LIFE_FORCE):
         self.world = world
@@ -1270,6 +1567,7 @@ class Simulation:
 #
 def evaluate_single_bug_worker(args):
     # --- Accept map_layout ---
+    tmp.set_sharing_strategy('file_system')
     bug, trials, fitness_fn, map_layout = args
     total_fitness = 0
     
@@ -1296,7 +1594,8 @@ class EvolutionaryTrainer:
                  population_size=POP_SIZE, 
                  mutation_rate=MUTATION_RATE, 
                  trials=1,
-                 map_layout="empty"):
+                 map_layout="empty",
+                 name=None):
         
         self.bug_class = bug_class
         self.vision_cone = vision_cone
@@ -1308,12 +1607,13 @@ class EvolutionaryTrainer:
         self.map_layout = map_layout
         
         self.overall_best_score = -9999999 
+        self.name = name
 
     def train(self):
         fitness_name = self.fitness_fn.__name__.upper()
         bug_name = self.bug_class.__name__
         
-        Log.info(f"--- STARTING {bug_name} EVOLUTION ({fitness_name}) ---")
+        Log.info(f"--- STARTING {bug_name} EVOLUTION ({fitness_name}) {self.name} ---")
         Log.info(f"Generations: {self.generations} | Population: {self.population_size} | Trials: {self.trials}")
 
         # 1. Initialize Generation 0 using the provided class
@@ -1496,30 +1796,58 @@ if __name__ == "__main__":
 
     for fitness_fn in fitness_fns:
         for name, vision in VISION_CONES.items():
-            trainer_neural = EvolutionaryTrainer(
-                bug_class=NeuralBug,
-                vision_cone=vision,
-                generations=GENERATIONS,
-                population_size=POP_SIZE,
-                mutation_rate=MUTATION_RATE,
-                fitness_fn=fitness_fn,
-                map_layout=MAP_CREATION_TYPE,
-                trials=TRIALS_PER_EPOCH
-            )
+            print("-"*10)
+            print(f"Vision: {name} - {fitness_fn.__name__}")
+            print("-"*10)
 
-            trainer_memory = EvolutionaryTrainer(
-                bug_class=MemoryBug,
-                vision_cone=vision,
-                fitness_fn=fitness_fn,
-                generations=GENERATIONS,
-                population_size=POP_SIZE,
-                mutation_rate=MUTATION_RATE,
-                map_layout=MAP_CREATION_TYPE,
-                trials=TRIALS_PER_EPOCH
-            )
+            neural_path  = f'bug_saves/neural-{name}-{fitness_fn.__name__}-dungeon.json'
+            memory_path  = f"bug_saves/memory-{name}-{fitness_fn.__name__}-dungeon.json"
+            torchnn_path = f"bug_saves/torchnn-{name}-{fitness_fn.__name__}-dungeon.json"
 
-            best_neural = trainer_neural.train()
-            best_neural.save_to_file(f'bug_saves/neural-{name}-{fitness_fn.__name__}-dungeon.json')
+            if not os.path.exists(neural_path):
+                trainer_neural = EvolutionaryTrainer(
+                    bug_class=NeuralBug,
+                    vision_cone=vision,
+                    generations=GENERATIONS,
+                    population_size=POP_SIZE,
+                    mutation_rate=MUTATION_RATE,
+                    fitness_fn=fitness_fn,
+                    map_layout=MAP_CREATION_TYPE,
+                    trials=TRIALS_PER_EPOCH,
+                    name="Neural"
+                )
+                best_neural = trainer_neural.train()
+                best_neural.save_to_file(neural_path)
 
-            best_memory = trainer_memory.train()
-            best_memory.save_to_file(f"bug_saves/memory-{name}-{fitness_fn.__name__}-dungeon.json")
+            if not os.path.exists(memory_path):
+                trainer_memory = EvolutionaryTrainer(
+                    bug_class=MemoryBug,
+                    vision_cone=vision,
+                    fitness_fn=fitness_fn,
+                    generations=GENERATIONS,
+                    population_size=POP_SIZE,
+                    mutation_rate=MUTATION_RATE,
+                    map_layout=MAP_CREATION_TYPE,
+                    trials=TRIALS_PER_EPOCH,
+                    name="Memory"
+                )
+                best_memory = trainer_memory.train()
+                best_memory.save_to_file(memory_path)
+
+            if not os.path.exists(torchnn_path):
+                trainer_torchnn = EvolutionaryTrainer(
+                    bug_class=TorchBug,
+                    vision_cone=vision,
+                    fitness_fn=fitness_fn,
+                    generations=GENERATIONS,
+                    population_size=POP_SIZE,
+                    mutation_rate=MUTATION_RATE,
+                    map_layout=MAP_CREATION_TYPE,
+                    trials=TRIALS_PER_EPOCH,
+                    name="TorchNN"
+                )
+                best_torchnn = trainer_torchnn.train()
+                best_torchnn.save_to_file(torchnn_path)
+
+            print("")
+            print("")

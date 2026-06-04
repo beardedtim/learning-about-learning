@@ -259,4 +259,4 @@ def run_visualizer(filename, layout="u_trap"):
     pygame.quit()
 
 if __name__ == "__main__":
-    run_visualizer("bug_saves/neural-Balanced-fitness_efficiency-maze.json", layout="maze")
+    run_visualizer("bug_saves/memory-Balanced-fitness_efficiency-dungeon.json", layout="dungeon")
