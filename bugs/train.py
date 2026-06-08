@@ -1,7 +1,7 @@
 import os
 import torch
 from torch.func import functional_call, vmap
-
+import time
 # Import your existing modules
 from world import World, FunctionalWorld
 from species import GeneticColonySpecies
@@ -67,7 +67,7 @@ def evolve_params(params, fitness_scores, tournament_size=TOURNY_SIZE, mutation_
         noise = torch.randn_like(new_W) * mutation_rate * noise_mask.view(*shape)
         
         # Create the newly mutated generation
-        new_params[name] = new_W + noise
+        new_params[name] = (new_W + noise).detach().clone()
 
     return new_params
 
@@ -137,64 +137,85 @@ def train(checkpoint_path=None):
     # ==========================================
     # THE OUTER LOOP: GENERATIONS
     # ==========================================
-    for generation in range(GENERATIONS):
-        if DEBUG_LOGS: print(f"\n========== GENERATION {generation} ==========")
+    gen_start_time = time.time()
+    with torch.inference_mode():
+        for generation in range(GENERATIONS):
+            if DEBUG_LOGS: print(f"\n========== GENERATION {generation} ==========")
 
-        # A. Ask the legacy world object to generate fresh random maps & positions
-        vision_masks = [torch.ones(num_sensors) for _ in range(POPULATION_SIZE)]
-        world.populate(vision_masks, wall_density=WALL_DENSITY, force_recreate=generation % MAX_GENS_PER_MAP == 0)
+            # A. Ask the legacy world object to generate fresh random maps & positions
+            vision_masks = [torch.ones(num_sensors) for _ in range(POPULATION_SIZE)]
+            world.populate(vision_masks, wall_density=WALL_DENSITY, force_recreate=generation % MAX_GENS_PER_MAP == 0)
 
-        # B. Extract the batched tensors from the world object for the functional loop
-        maps = world.map.clone()
-        positions = world.positions.clone()
-        headings = world.headings.clone()
-        life = world.life_force.clone()
-        masks = world.masks.clone()
+            # B. Extract the batched tensors from the world object for the functional loop
+            maps = world.map.clone()
+            positions = world.positions.clone()
+            headings = world.headings.clone()
+            life = world.life_force.clone()
+            masks = world.masks.clone()
+            
+            # C. Initialize purely batched memory and starting observations
+            memory = torch.zeros(POPULATION_SIZE, base_brain.hidden_dim, device=DEVICE)
+            
+            # (Prime the observation using a quick vmap over the starting state)
+            prime_obs = vmap(FunctionalWorld.get_single_observation, in_dims=(0, 0, 0, 0, None, None, 0, None))
+            obs = prime_obs(positions, headings, life, maps, world.rotated_offsets, world.los_blockers, masks, MAX_LIFE)
+
+            fitness_scores = torch.zeros(POPULATION_SIZE, device=DEVICE)
+
+            # ==========================================
+            # THE INNER LOOP: LIFETIME STEPS
+            # ==========================================
+            total_food_eaten_gen = 0
+            for step in range(TOTAL_STEPS):
+                
+                # 1. Execute the incredibly fast compiled kernel
+                obs, memory, positions, headings, life, maps, ate_food = compiled_step(
+                    params, obs, memory, positions, headings, life, maps, masks
+                )
+
+                # 2. Add 1 point of fitness for every bug still alive
+                alive_mask = (life > 0)
+                if not alive_mask.any():
+                    if DEBUG_LOGS: print(f"-> Extinction Event at step {step}!")
+                    break
+                fitness_scores += alive_mask.float()
+
+                # 3. Handle asynchronous food spawning (Outside the compiled kernel)
+                if ate_food.any():
+                    # Temporarily pass the updated tensors back to the legacy world 
+                    # so it can run its built-in batched spawning logic
+                    world.map = maps
+                    world.positions = positions
+                    world._spawn_food(ate_food)
+                    maps = world.map
         
-        # C. Initialize purely batched memory and starting observations
-        memory = torch.zeros(POPULATION_SIZE, base_brain.hidden_dim, device=DEVICE)
-        
-        # (Prime the observation using a quick vmap over the starting state)
-        prime_obs = vmap(FunctionalWorld.get_single_observation, in_dims=(0, 0, 0, 0, None, None, 0, None))
-        obs = prime_obs(positions, headings, life, maps, world.rotated_offsets, world.los_blockers, masks, MAX_LIFE)
+                total_food_eaten_gen += ate_food.sum().item()
 
-        fitness_scores = torch.zeros(POPULATION_SIZE, device=DEVICE)
+            # ==========================================
+            # EVOLUTION PHASE
+            # ==========================================
+            champion_id = torch.argmax(fitness_scores).item()
+            best_score = fitness_scores[champion_id].item()
+            avg_score = torch.mean(fitness_scores).item()
+            std_score = torch.std(fitness_scores).item()
+            median_score = torch.median(fitness_scores).item()
+            survivors = (life > 0).sum().item()
 
-        # ==========================================
-        # THE INNER LOOP: LIFETIME STEPS
-        # ==========================================
-        for step in range(TOTAL_STEPS):
-            # 1. Execute the incredibly fast compiled kernel
-            obs, memory, positions, headings, life, maps, ate_food = compiled_step(
-                params, obs, memory, positions, headings, life, maps, masks
-            )
+            gen_time = time.time() - gen_start_time
+            sps = TOTAL_STEPS / gen_time
 
-            # 2. Add 1 point of fitness for every bug still alive
-            alive_mask = (life > 0)
-            fitness_scores += alive_mask.float()
+            if DEBUG_LOGS:
+                print(f"Gen {generation} / {GENERATIONS} [DONE]")
+                print(f"    Average Score   : {avg_score:.1f}")
+                print(f"    Champion Bug ID : {champion_id} (Score: {best_score:.1f})")
+                print(f"    Median Score  : {median_score:.1f}")
+                print(f"    Fitness StdDev: {std_score:.1f}")
+                print(f"    Total Food Eaten: {total_food_eaten_gen}")
+                print(f"    Final Survivors : {survivors} / {POPULATION_SIZE}")
+                print(f"    Gen Time : {gen_time:.2f}s ({sps:.0f} steps/sec)")
 
-            # 3. Handle asynchronous food spawning (Outside the compiled kernel)
-            if ate_food.any():
-                # Temporarily pass the updated tensors back to the legacy world 
-                # so it can run its built-in batched spawning logic
-                world.map = maps
-                world.positions = positions
-                world._spawn_food(ate_food)
-                maps = world.map # Retrieve the newly spawned maps
-
-        # ==========================================
-        # EVOLUTION PHASE
-        # ==========================================
-        champion_id = torch.argmax(fitness_scores).item()
-        best_score = fitness_scores[champion_id].item()
-        avg_score = torch.mean(fitness_scores).item()
-        
-        if DEBUG_LOGS:
-            print(f"Average Score   : {avg_score:.1f}")
-            print(f"Champion Bug ID : {champion_id} (Score: {best_score:.1f})")
-
-        # Mutate the parameters for the next generation
-        params = evolve_params(params, fitness_scores)
+            # Mutate the parameters for the next generation
+            params = evolve_params(params, fitness_scores)
 
     # ==========================================
     # SAVE THE FINAL CHAMPION
