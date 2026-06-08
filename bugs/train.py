@@ -137,9 +137,9 @@ def train(checkpoint_path=None):
     # ==========================================
     # THE OUTER LOOP: GENERATIONS
     # ==========================================
-    gen_start_time = time.time()
     with torch.inference_mode():
         for generation in range(GENERATIONS):
+            gen_start_time = time.time()
             if DEBUG_LOGS: print(f"\n========== GENERATION {generation} ==========")
 
             # A. Ask the legacy world object to generate fresh random maps & positions
