@@ -12,7 +12,8 @@ POPULATION_SIZE     = 4096   # Double this if your GPU VRAM can comfortably hand
 TOTAL_STEPS         = 2000   # Force them to prove they can survive long-term.
 GENERATIONS         = 1000   #
 TOURNY_SIZE         = 4      # Slightly lower to preserve genetic diversity over a long run.
-MUTATION_RATE       = 0.015  #
+MUTATION_RATE       = 0.015  # How mutated does a gene get?
+MUTATION_CHANCE     = 0.1    # How likely any gene is to mutate?
 
 # Vision
 SENSOR_RADIUS       = 5 
@@ -23,7 +24,7 @@ SPECIES_FOV_DEG     = 120
 # World Complexity
 GRID_SIZE           = 32     #
 WALL_DENSITY        = 0.125   # 12.5% walls
-MAX_GENS_PER_MAP    = 5      # Prevents them from memorizing the layout.
+MAX_GENS_PER_MAP    = 1      # Prevents them from memorizing the layout.
 
 # Survival Mechanics
 MAX_LIFE            = 100.0 
@@ -38,7 +39,7 @@ DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 # ==========================================
 # EVOLUTION (Now operating on Batched Params)
 # ==========================================
-def evolve_params(params, fitness_scores, tournament_size=TOURNY_SIZE, mutation_rate=MUTATION_RATE):
+def evolve_params(params, fitness_scores, tournament_size=TOURNY_SIZE, mutation_rate=MUTATION_RATE, mutation_chance=MUTATION_CHANCE):
     """
     Mutates a dictionary of batched parameters functionally.
     """
@@ -64,9 +65,10 @@ def evolve_params(params, fitness_scores, tournament_size=TOURNY_SIZE, mutation_
         
         # Broadcast the mask to match the parameter dimensions
         shape = [num_bugs] + [1] * (new_W.ndim - 1)
-        noise = torch.randn_like(new_W) * mutation_rate * noise_mask.view(*shape)
+        sparse_mask = (torch.rand_like(new_W) < mutation_chance).float()
+        noise = torch.randn_like(new_W) * mutation_rate * sparse_mask * noise_mask.view(*shape)
         
-        # Create the newly mutated generation
+        # Create the newly mutated generation AND DETACH IT
         new_params[name] = (new_W + noise).detach().clone()
 
     return new_params

@@ -9,38 +9,35 @@ class GeneticColonySpecies(nn.Module):
         output_dim = 3 
         
         # 1. Vision Encoder
-        # Instead of dumping raw sensor data into memory, we process it into concepts first.
         self.vision_enc = nn.Linear(input_dim, hidden_dim)
         
         # 2. The Update Gate
-        # Takes what it sees + what it remembers, and outputs a decision (0.0 to 1.0)
         self.gate_layer = nn.Linear(hidden_dim * 2, hidden_dim)
+        # Inductive bias: Start by relying on vision (gate near 0.0)
+        nn.init.constant_(self.gate_layer.bias, -1.0) 
         
         # 3. The Candidate Thought
-        # What the bug *would* think if it decided to completely overwrite its memory
         self.candidate_layer = nn.Linear(hidden_dim * 2, hidden_dim)
         
         # 4. Action Decoder
         self.fc_action = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, observation, memory):
-        # 1. Process raw sight into abstract visual features
-        vision_features = torch.relu(self.vision_enc(observation))
+        # 1. Process raw sight (SiLU preserves more genetic information than ReLU)
+        vision_features = torch.nn.functional.silu(self.vision_enc(observation))
         
-        # Concatenate vision and past memory to evaluate them together
         combined_state = torch.cat([vision_features, memory], dim=-1)
         
-        # 2. Compute the Gate (Sigmoid squashes the output to exactly [0, 1])
-        # A value near 1.0 means "keep old memory". A value near 0.0 means "write new memory".
+        # 2. Compute the Gate 
         gate = torch.sigmoid(self.gate_layer(combined_state))
         
-        # 3. Compute the new Candidate Thought
-        candidate_memory = torch.relu(self.candidate_layer(combined_state))
+        # 3. Compute the new Candidate Thought (Tanh prevents exploding memory)
+        candidate_memory = torch.tanh(self.candidate_layer(combined_state))
         
-        # 4. The Magic Math: Interpolate between the past and the present
+        # 4. Interpolate between past and present
         new_memory = (gate * memory) + ((1.0 - gate) * candidate_memory)
         
-        # 5. Decide the action based on this highly refined memory state
+        # 5. Decide the action
         logits = self.fc_action(new_memory)
         action = torch.argmax(logits, dim=-1)
         
