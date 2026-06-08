@@ -122,12 +122,15 @@ class World:
                 # leave as pad_idx — it won't be a wall so no false occlusion
 
         return blocker_indices.to(self.device)
+    
     def _spawn_food(self, needs_food_mask):
-        batch_idx = torch.arange(self.num_bugs, device=self.device)
         active_search = needs_food_mask.clone()
+        batch_idx = torch.arange(self.num_bugs, device=self.device)
+
         
-        while active_search.any():
-            # Generate ALL candidates at once instead of one per bug
+        # Use a fixed number of attempts instead of a while loop
+        # 3-5 iterations is usually plenty to find an empty spot 
+        for _ in range(5): 
             rand_x = torch.randint(1, self.grid_size - 1, (self.num_bugs, 10), device=self.device)
             rand_y = torch.randint(1, self.grid_size - 1, (self.num_bugs, 10), device=self.device)
             
@@ -135,11 +138,14 @@ class World:
                 target_tiles = self.map[batch_idx, rand_y[:, i], rand_x[:, i]]
                 is_empty = (target_tiles == self.EMPTY)
                 on_bug = (rand_x[:, i] == self.positions[:, 0]) & (rand_y[:, i] == self.positions[:, 1])
+                
                 valid = active_search & is_empty & ~on_bug
-                if valid.any():
-                    self.map[batch_idx[valid], rand_y[valid, i], rand_x[valid, i]] = self.FOOD
-                    active_search = active_search & ~valid
-        
+                
+                # Apply the food directly using the boolean mask.
+                # If 'valid' is entirely False, PyTorch skips this inherently on the GPU.
+                self.map[batch_idx[valid], rand_y[valid, i], rand_x[valid, i]] = self.FOOD
+                active_search = active_search & ~valid
+
     def _compute_cone_offsets(self, fov_degrees=120, front_radius=5, side_radius=2):
         # Use the larger radius for the initial square so we don't miss anything
         max_radius = max(front_radius, side_radius)
@@ -175,7 +181,7 @@ class World:
         cone_mask = within_range & within_fov & not_self
         return offsets[cone_mask].long()
 
-    def populate(self, bug_masks_list, wall_density=0.2):
+    def populate(self, bug_masks_list, wall_density=0.2, force_recreate=False):
         """
         Takes a list of 1d vectors and initializes the population and their private maps.
         """
@@ -190,7 +196,9 @@ class World:
         self.life_force = torch.full((self.num_bugs,), self.MAX_LIFE // 2, dtype=torch.float32, device=self.device)
 
         # Generate the private randomized maps
-        self.generate_random_map(wall_density)
+        if self.map is None or force_recreate:
+            self.generate_random_map(wall_density)
+            
         
         for _ in range(self.min_food):
             needs_food_mask = torch.ones(self.num_bugs, dtype=torch.bool, device=self.device)
@@ -317,6 +325,103 @@ class World:
 
         return self.get_observations()
     
+
+class FunctionalWorld:
+    EMPTY = 0
+    WALL = 2
+    FOOD = 4
+
+    @staticmethod
+    def get_single_observation(pos, heading, life, bug_map, rotated_offsets, los_blockers, mask, max_life):
+        """
+        Pure function: 1 Bug, 1 Map -> 1 Observation Vector
+        Uses pre-computed rotated offsets and line-of-sight blocker indices.
+        """
+        # 1. Get relative sensor offsets based on current heading: shape (num_sensors, 2)
+        rel_coords = rotated_offsets[heading]
+        abs_coords = rel_coords + pos
+        
+        # 2. Clamp coordinates to map boundaries
+        grid_size = bug_map.shape[0]
+        x_coords = torch.clamp(abs_coords[:, 0], 0, grid_size - 1)
+        y_coords = torch.clamp(abs_coords[:, 1], 0, grid_size - 1)
+        
+        # 3. Read the raw tiles from the map: shape (num_sensors)
+        raw_views = bug_map[y_coords, x_coords]
+        
+        # 4. Occlusion logic using pre-computed blockers
+        # los_blockers shape: (num_sensors, max_blockers)
+        # Look up the tile values at the blocker indices
+        blocked_views = raw_views[los_blockers]
+        
+        # If any tile in the line-of-sight path is a WALL, the sensor is blocked
+        is_blocked = (blocked_views == FunctionalWorld.WALL).any(dim=1)
+        
+        visible_views = torch.where(
+            is_blocked,
+            torch.tensor(FunctionalWorld.EMPTY, device=bug_map.device, dtype=raw_views.dtype),
+            raw_views
+        )
+        
+        # 5. Apply the bug's specific vision mask (for blind spots, etc.)
+        final_vision = visible_views * mask
+        
+        # 6. Append normalized life force
+        normalized_life = (life / max_life).unsqueeze(0)
+        
+        return torch.cat([final_vision, normalized_life], dim=0)
+
+    @staticmethod
+    def single_step(action, pos, heading, life, bug_map, forward_vectors, life_decay, food_reward, max_life):
+        """
+        Pure function: Takes current state, returns NEXT state.
+        """
+        # 0. ALIVE CHECK: Is this bug currently breathing?
+        is_alive = (life > 0.0)
+
+        # 1. Turn updates (Dead bugs can technically still "think" and turn in place, 
+        # but they won't move. You can mask this too if you want, but it doesn't affect the map.)
+        new_heading = torch.where(action == 1, (heading + 1) % 4, heading)
+        new_heading = torch.where(action == 2, (new_heading - 1) % 4, new_heading)
+        
+        # 2. Movement updates
+        move_forward = (action == 0)
+        delta = forward_vectors[new_heading]
+        attempted_pos = pos + delta
+        
+        grid_size = bug_map.shape[0]
+        x_check = torch.clamp(attempted_pos[0], 0, grid_size - 1)
+        y_check = torch.clamp(attempted_pos[1], 0, grid_size - 1)
+        
+        target_tile = bug_map[y_check, x_check]
+        
+        # GHOST MASK: You must be alive to have a valid move or eat food
+        valid_move = is_alive & move_forward & (target_tile != FunctionalWorld.WALL)
+        ate_food = is_alive & valid_move & (target_tile == FunctionalWorld.FOOD)
+        
+        # 3. Apply position updates
+        new_pos = torch.where(valid_move, attempted_pos, pos)
+        
+        # 4. Apply Life updates
+        # If dead, keep life at 0 (prevent zombies from getting food or going negative).
+        # If alive, decay life and add food reward.
+        new_life = torch.where(
+            is_alive,
+            torch.clamp(life - life_decay + (ate_food * food_reward), 0.0, max_life),
+            torch.tensor(0.0, device=bug_map.device, dtype=life.dtype)
+        )
+        
+        # 5. Map Updates
+        new_map = bug_map.clone()
+        current_tile = new_map[y_check, x_check]
+        
+        new_map[y_check, x_check] = torch.where(
+            ate_food, # ate_food already requires is_alive to be True
+            torch.tensor(FunctionalWorld.EMPTY, device=bug_map.device, dtype=current_tile.dtype),
+            current_tile
+        )
+             
+        return new_pos, new_heading, new_life, new_map, ate_food
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt

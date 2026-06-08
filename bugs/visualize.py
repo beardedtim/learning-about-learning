@@ -21,7 +21,7 @@ import pygame
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
-from world import World
+from world import World, FunctionalWorld
 from species import GeneticColonySpecies
 from checkpoint import load_champion
 
@@ -103,13 +103,18 @@ class SimState:
     def __init__(self, checkpoint_path, device):
         self.device = device
         self.checkpoint_path = checkpoint_path
+        self.forward_vectors = torch.tensor([[0, -1], [1, 0], [0, 1], [-1, 0]], device=self.device)
         self._load()
 
     def _load(self):
         print(f"[Viz] Loading champion from {self.checkpoint_path} ...")
-        brain_single, data = load_champion(GeneticColonySpecies, self.checkpoint_path, device=self.device)
+        
+        # The new brain is a standard stateless PyTorch module. load_champion hydrates it!
+        self.brain, data = load_champion(GeneticColonySpecies, self.checkpoint_path, device=self.device)
+        self.brain.eval() # Set to evaluation mode
+        
         cfg = data["world_config"]
-
+        print(f"Config: {cfg}")
         self.world = World(
             grid_size       = cfg["grid_size"],
             sensor_radius   = cfg["sensor_radius"],
@@ -125,19 +130,23 @@ class SimState:
 
         num_sensors = self.world.num_sensors
         vision_mask = [torch.ones(num_sensors, device=self.device)]
-        self.world.populate(vision_mask)
+        self.world.populate(vision_mask, wall_density=0.05)
 
-        # Single-bug brain seeded from champion
-        self.brain = GeneticColonySpecies(1, num_sensors, hidden_dim=data["W1"].shape[1], device=self.device)
-        with torch.no_grad():
-            self.brain.W1[0].copy_(data["W1"].to(self.device))
-            self.brain.b1[0].copy_(data["b1"].to(self.device))
-            self.brain.W2[0].copy_(data["W2"].to(self.device))
-            self.brain.b2[0].copy_(data["b2"].to(self.device))
-            self.brain.W_rec[0].copy_(data["W_rec"].to(self.device))
-        self.brain.reset_memory()
+        # Initialize the stateless memory for a single bug
+        self.memory = torch.zeros(self.brain.hidden_dim, device=self.device)
 
-        self.obs      = self.world.get_observations()
+        # Get the first observation using the FunctionalWorld
+        self.obs = FunctionalWorld.get_single_observation(
+            self.world.positions[0],
+            self.world.headings[0],
+            self.world.life_force[0],
+            self.world.map[0],
+            self.world.rotated_offsets,
+            self.world.los_blockers,
+            self.world.masks[0],
+            self.world.MAX_LIFE
+        )
+
         self.step_num = 0
         self.food_eaten = 0
         self.last_action = 0
@@ -152,16 +161,58 @@ class SimState:
     def step(self):
         if not self.alive:
             return
-        prev_life = self.world.life_force[0].item()
-        actions   = self.brain(self.obs)
-        self.obs  = self.world.step(actions)
-        self.last_action = actions[0].item()
-        new_life  = self.world.life_force[0].item()
-        if new_life > prev_life:
+            
+        # 1. Brain thinks (Stateless)
+        action, self.memory = self.brain(self.obs, self.memory)
+        self.last_action = action.item()
+        
+        # 2. Physics step
+        new_pos, new_heading, new_life, new_map, ate_food = FunctionalWorld.single_step(
+            action,
+            self.world.positions[0],
+            self.world.headings[0],
+            self.world.life_force[0],
+            self.world.map[0],
+            self.forward_vectors,
+            self.world.LIFE_DECAY,
+            self.world.FOOD_REWARD,
+            self.world.MAX_LIFE
+        )
+        
+        # 3. Map state back to the visualizer's world instance so the UI can draw it
+        self.world.positions[0] = new_pos
+        self.world.headings[0] = new_heading
+        self.world.life_force[0] = new_life
+        self.world.map[0] = new_map
+        
+        # 4. Camera gets new frame
+        self.obs = FunctionalWorld.get_single_observation(
+            new_pos, new_heading, new_life, new_map,
+            self.world.rotated_offsets,
+            self.world.los_blockers,
+            self.world.masks[0],
+            self.world.MAX_LIFE
+        )
+        
+        # Update stats and handle food respawning
+        if ate_food:
             self.food_eaten += 1
+            # Respawning food so the visualizer doesn't eventually run out
+            needs_food_mask = torch.tensor([True], device=self.device)
+            self.world._spawn_food(needs_food_mask)
+            
+            # Recalculate observation just in case food spawned directly in front of the bug!
+            self.obs = FunctionalWorld.get_single_observation(
+                new_pos, new_heading, new_life, self.world.map[0],
+                self.world.rotated_offsets,
+                self.world.los_blockers,
+                self.world.masks[0],
+                self.world.MAX_LIFE
+            )
+
         self.step_num += 1
-        self.last_life = new_life
-        if new_life <= 0:
+        self.last_life = new_life.item()
+        if self.last_life <= 0:
             self.alive = False
 
     # ── query helpers ──────────────────────────────────────────────────────────
@@ -177,8 +228,11 @@ class SimState:
     def max_life(self): return self.world.MAX_LIFE
     @property
     def map_np(self): return self.world.map[0].cpu()                  # tensor HxW
+    
+    # Updated: Since this is a single unbatched pass, obs is a 1D tensor
     @property
-    def vision_1d(self): return self.obs[0, :-1].cpu()               # (num_sensors,)
+    def vision_1d(self): return self.obs[:-1].cpu()                   
+    
     @property
     def cone_offsets(self): return self.world.cone_offsets.cpu()      # (N, 2)  x,y
 
@@ -596,7 +650,7 @@ def main(checkpoint_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bug Simulation Visualizer")
-    parser.add_argument("checkpoint", nargs="?", default="bug.pt",
+    parser.add_argument("checkpoint", nargs="?", default="bug-fov120-radius5-front5-side2.pt",
                         help="Path to .pt checkpoint file (e.g. bug.pt)")
     args = parser.parse_args()
 

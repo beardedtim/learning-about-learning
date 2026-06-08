@@ -2,61 +2,46 @@ import torch
 import torch.nn as nn
 
 class GeneticColonySpecies(nn.Module):
-    def __init__(self, num_bugs, num_sensors, hidden_dim=16, device="cuda"):
+    def __init__(self, num_sensors, hidden_dim=16):
         super().__init__()
-        self.num_bugs = num_bugs
-        self.device = device
-        self.hidden_dim = hidden_dim # Store this for the memory reset
-        
+        self.hidden_dim = hidden_dim
         input_dim = num_sensors + 1
         output_dim = 3 
         
-        # --- THE GENES ---
+        # 1. Vision Encoder
+        # Instead of dumping raw sensor data into memory, we process it into concepts first.
+        self.vision_enc = nn.Linear(input_dim, hidden_dim)
         
-        # Layer 1 (Input -> Hidden)
-        self.W1 = nn.Parameter(torch.randn(num_bugs, input_dim, hidden_dim, device=device) * 0.1)
-        self.b1 = nn.Parameter(torch.zeros(num_bugs, 1, hidden_dim, device=device))
+        # 2. The Update Gate
+        # Takes what it sees + what it remembers, and outputs a decision (0.0 to 1.0)
+        self.gate_layer = nn.Linear(hidden_dim * 2, hidden_dim)
         
-        # The Memory Matrix (Hidden -> Hidden)
-        # This allows the bug to look at its own thoughts from the previous frame
-        self.W_rec = nn.Parameter(torch.randn(num_bugs, hidden_dim, hidden_dim, device=device) * 0.1)
+        # 3. The Candidate Thought
+        # What the bug *would* think if it decided to completely overwrite its memory
+        self.candidate_layer = nn.Linear(hidden_dim * 2, hidden_dim)
         
-        # Layer 2 (Hidden -> Output)
-        self.W2 = nn.Parameter(torch.randn(num_bugs, hidden_dim, output_dim, device=device) * 0.1)
-        self.b2 = nn.Parameter(torch.zeros(num_bugs, 1, output_dim, device=device))
+        # 4. Action Decoder
+        self.fc_action = nn.Linear(hidden_dim, output_dim)
 
-        # The actual memory bank
-        self.memory = None
-
-    def reset_memory(self):
-        """Must be called at the start of every new generation or life cycle!"""
-        self.memory = torch.zeros(self.num_bugs, 1, self.hidden_dim, device=self.device)
-
-    def forward(self, observations):
-        x = observations.unsqueeze(1)
+    def forward(self, observation, memory):
+        # 1. Process raw sight into abstract visual features
+        vision_features = torch.relu(self.vision_enc(observation))
         
-        # Initialize memory on the very first step
-        if self.memory is None:
-            self.reset_memory()
+        # Concatenate vision and past memory to evaluate them together
+        combined_state = torch.cat([vision_features, memory], dim=-1)
         
-        # --- BATCHED RECURRENT NEURAL NETWORK MATH ---
+        # 2. Compute the Gate (Sigmoid squashes the output to exactly [0, 1])
+        # A value near 1.0 means "keep old memory". A value near 0.0 means "write new memory".
+        gate = torch.sigmoid(self.gate_layer(combined_state))
         
-        # 1. What does the bug see right now?
-        current_vision = torch.bmm(x, self.W1)
+        # 3. Compute the new Candidate Thought
+        candidate_memory = torch.relu(self.candidate_layer(combined_state))
         
-        # 2. What was the bug thinking a millisecond ago?
-        past_thoughts = torch.bmm(self.memory, self.W_rec)
+        # 4. The Magic Math: Interpolate between the past and the present
+        new_memory = (gate * memory) + ((1.0 - gate) * candidate_memory)
         
-        # 3. Combine them! (Input + Memory + Bias)
-        hidden = torch.relu(current_vision + past_thoughts + self.b1)
+        # 5. Decide the action based on this highly refined memory state
+        logits = self.fc_action(new_memory)
+        action = torch.argmax(logits, dim=-1)
         
-        # 4. Save this new thought for the NEXT frame
-        self.memory = hidden.detach() 
-        
-        # 5. Decide the action based on the combined thoughts
-        logits = torch.bmm(hidden, self.W2) + self.b2
-        logits = logits.squeeze(1)
-        
-        actions = torch.argmax(logits, dim=1)
-        
-        return actions
+        return action, new_memory

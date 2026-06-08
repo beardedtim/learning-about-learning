@@ -1,223 +1,221 @@
+import os
 import torch
+from torch.func import functional_call, vmap
 
-from world import World
+# Import your existing modules
+from world import World, FunctionalWorld
 from species import GeneticColonySpecies
 from checkpoint import save_champion, load_champion
 
-POPULATION_SIZE = 20000 # How many total species are alive at any given time?
-TOTAL_STEPS     = 2000 # How many steps per generation do we allow?
-GENERATIONS     = 100 # How many generations do we evolve?
-TOURNY_SIZE     = 4 # How much selective pressure we apply during evolution; i.e. how much it favors the best bugs
-MUTATION_RATE   = 0.05 # When we mutate, what is the rate of change? 0.02 = 2%
+# --- HYPERPARAMETERS ---
+POPULATION_SIZE     = 4096   # Double this if your GPU VRAM can comfortably handle it.
+TOTAL_STEPS         = 2000   # Force them to prove they can survive long-term.
+GENERATIONS         = 1000   #
+TOURNY_SIZE         = 4      # Slightly lower to preserve genetic diversity over a long run.
+MUTATION_RATE       = 0.015  #
 
-SENSOR_RADIUS       = 5 # At the very max, how large is any individual species' sensor radius?
-FRONT_FOV_RADIUS    = 5 # How far in front can it see?
-SIDE_FOV_RADIUS     = 2 # How off to the side can it see?
-SPECIES_FOV_DEG     = 120 # What is the sensor cone's radius of the entity?
+# Vision
+SENSOR_RADIUS       = 5 
+FRONT_FOV_RADIUS    = 5 
+SIDE_FOV_RADIUS     = 2 
+SPECIES_FOV_DEG     = 120 
 
-GRID_SIZE       = 24 # XxX grid. What is X?
-MAX_LIFE        = 100.0 # What is the max life any species can have?
-MIN_FOOD        = 15 # Howmuch food does the world spawn with?
-LIFE_DECAY      = 1.0 # How much does each species lose per turn?
-LIFE_REWARD     = 100.0 # How much do they get when they eat?
-MODEL_OUTPUT    = "bug.pt"
+# World Complexity
+GRID_SIZE           = 32     #
+WALL_DENSITY        = 0.125   # 12.5% walls
+MAX_GENS_PER_MAP    = 5      # Prevents them from memorizing the layout.
 
-DEBUG_LOGS  = True # Do we add all the logs that make you feel good
-DEVICE      = "cuda" # What device (cpu/cuda) do you want to run all this on. Tested on GPU
+# Survival Mechanics
+MAX_LIFE            = 100.0 
+MIN_FOOD            = 25     
+LIFE_DECAY          = 1.0 
+LIFE_REWARD         = 35.0
+MODEL_OUTPUT        = f"bug-fov{SPECIES_FOV_DEG}-radius{SENSOR_RADIUS}-front{FRONT_FOV_RADIUS}-side{SIDE_FOV_RADIUS}.pt"
 
-def evolve_population(brain, fitness_scores, tournament_size=TOURNY_SIZE, mutation_rate=MUTATION_RATE):
-    num_bugs = brain.num_bugs
+DEBUG_LOGS  = True 
+DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Draw all tournament candidates at once: (num_bugs, tournament_size)
-    candidates = torch.randint(0, num_bugs, (num_bugs, tournament_size), device=brain.device)
+# ==========================================
+# EVOLUTION (Now operating on Batched Params)
+# ==========================================
+def evolve_params(params, fitness_scores, tournament_size=TOURNY_SIZE, mutation_rate=MUTATION_RATE):
+    """
+    Mutates a dictionary of batched parameters functionally.
+    """
+    num_bugs = fitness_scores.shape[0]
+
+    # Draw all tournament candidates at once
+    candidates = torch.randint(0, num_bugs, (num_bugs, tournament_size), device=DEVICE)
     candidate_scores = fitness_scores[candidates]
-    winner_indices = candidates[torch.arange(num_bugs, device=brain.device), 
-                                torch.argmax(candidate_scores, dim=1)]
+    winner_indices = candidates[torch.arange(num_bugs, device=DEVICE), torch.argmax(candidate_scores, dim=1)]
     
-    # Preserve the elite bug in slot 0
-    winner_indices[0] = torch.argmax(fitness_scores)
+    # Elitism: Preserve the absolute best bug in slot 0
+    champion_idx = torch.argmax(fitness_scores)
+    winner_indices[0] = champion_idx
 
-    # Gather all weights at once using index_select
-    new_W1   = brain.W1[winner_indices]
-    new_b1   = brain.b1[winner_indices]
-    new_W2   = brain.W2[winner_indices]
-    new_b2   = brain.b2[winner_indices]
-    new_W_rec = brain.W_rec[winner_indices]
-
-    # Mutation mask: protect slot 0
-    noise_mask = torch.ones(num_bugs, device=brain.device)
+    # Mutation mask: Protect slot 0 from noise
+    noise_mask = torch.ones(num_bugs, device=DEVICE)
     noise_mask[0] = 0
 
-    with torch.no_grad():
-        brain.W1.copy_(new_W1    + torch.randn_like(new_W1)    * mutation_rate * noise_mask.view(-1, 1, 1))
-        brain.b1.copy_(new_b1    + torch.randn_like(new_b1)    * mutation_rate * noise_mask.view(-1, 1, 1))
-        brain.W2.copy_(new_W2    + torch.randn_like(new_W2)    * mutation_rate * noise_mask.view(-1, 1, 1))
-        brain.b2.copy_(new_b2    + torch.randn_like(new_b2)    * mutation_rate * noise_mask.view(-1, 1, 1))
-        brain.W_rec.copy_(new_W_rec + torch.randn_like(new_W_rec) * mutation_rate * noise_mask.view(-1, 1, 1))
+    new_params = {}
+    for name, param in params.items():
+        # Select the winning weights
+        new_W = param[winner_indices]
+        
+        # Broadcast the mask to match the parameter dimensions
+        shape = [num_bugs] + [1] * (new_W.ndim - 1)
+        noise = torch.randn_like(new_W) * mutation_rate * noise_mask.view(*shape)
+        
+        # Create the newly mutated generation
+        new_params[name] = new_W + noise
 
-def print_generation_stats(fitness, step, total_population):
-    """
-    Prints a clean summary of the colony's current fitness.
-    """    
-    # Calculate stats
-    avg_fit = torch.mean(fitness).item()
-    max_fit = torch.max(fitness).item()
-    min_fit = torch.min(fitness).item()
-    
-    # Calculate survival (how many bugs have health > 0)
-    survivors = (fitness > 0).sum().item()
-    survival_rate = (survivors / total_population) * 100
-    
-    # Find the index of the absolute best bug
-    best_bug_idx = torch.argmax(fitness).item()
+    return new_params
 
-    print(f"--- Step {step} ---")
-    print(f"Survivors : {survivors}/{total_population} ({survival_rate:.1f}%)")
-    print(f"Average   : {avg_fit:.1f}")
-    print(f"Worst Bug : {min_fit:.1f}")
-    print(f"Best Bug  : {max_fit:.1f} (Bug ID: {best_bug_idx})")
-    print("-" * 19)
 
-def standard_survival_fitness(fitness_scores, world, actions, actually_moved):
-    # One point per step alive. That's it.
-    # Eating is not rewarded directly — it's just the mechanism to stay alive longer.
-    alive = (world.life_force > 0).float()
-    return fitness_scores + alive
+# ==========================================
+# MAIN TRAINING LOOP
+# ==========================================
+def train(checkpoint_path=None):
+    if DEBUG_LOGS:
+        print(f"--- Initializing Functional Simulation on {DEVICE.upper()} ---")
 
-def train(
-        pop_size=POPULATION_SIZE, 
-        sensor_radius=SENSOR_RADIUS,
-        fov_deg=SPECIES_FOV_DEG,
-        front_fov_radius = FRONT_FOV_RADIUS,
-        side_fov_radius = SIDE_FOV_RADIUS, 
-        total_steps=TOTAL_STEPS, 
-        num_generations=GENERATIONS,
-        min_food=MIN_FOOD,
-        grid_size=GRID_SIZE,
-        max_life=MAX_LIFE,
-        life_decay=LIFE_DECAY,
-        model_output=MODEL_OUTPUT,
-        food_reward=LIFE_REWARD,
-        fitness_fn=standard_survival_fitness,
-        checkpoint_path=None,
-        debug_logs=DEBUG_LOGS):
-    # 1. INITIAL SETUP
+    # 1. Setup World Constants (Using the original World class to handle static configs & food spawning)
     world = World(
-        grid_size=grid_size, 
-        sensor_radius=sensor_radius, 
-        front_fov_radius=front_fov_radius, 
-        side_fov_radius=side_fov_radius, 
-        fov_degrees=fov_deg, 
-        min_food=min_food, 
-        max_life=max_life,
-        food_reward=food_reward,
-        life_decay=life_decay,
-        device=DEVICE)
+        grid_size=GRID_SIZE, 
+        sensor_radius=SENSOR_RADIUS, 
+        front_fov_radius=FRONT_FOV_RADIUS, 
+        side_fov_radius=SIDE_FOV_RADIUS, 
+        fov_degrees=SPECIES_FOV_DEG, 
+        min_food=MIN_FOOD, 
+        max_life=MAX_LIFE,
+        food_reward=LIFE_REWARD,
+        life_decay=LIFE_DECAY,
+        device=DEVICE
+    )
     
     num_sensors = world.num_sensors
 
-    # Create the vision masks (all 1s for full vision for now)
-    vision_masks = [torch.ones(num_sensors) for _ in range(pop_size)]
+    # 2. Setup the Single-Agent Brain Template
+    base_brain = GeneticColonySpecies(num_sensors=num_sensors, hidden_dim=16).to(DEVICE)
     
-    # Initialize the World and the Batched Brain
-    world.populate(vision_masks)
-    brain = GeneticColonySpecies(pop_size, num_sensors, hidden_dim=16, device=DEVICE)
-    if checkpoint_path is not None:
-        if debug_logs == True:
-            print(f"[Train] Seeding population from {checkpoint_path}...")
+    # 3. Create the Batched Parameters Dictionary
+    if checkpoint_path is not None and os.path.exists(checkpoint_path):
+        if DEBUG_LOGS: print(f"Loading champion from {checkpoint_path}...")
+        # Since load_champion now returns a fully hydrated model, just overwrite base_brain
+        base_brain, _ = load_champion(GeneticColonySpecies, checkpoint_path, device=DEVICE)
+
+    # Expand the single brain's weights into a batched dictionary
+    params = {
+        name: param.unsqueeze(0).expand(POPULATION_SIZE, *param.shape).clone()
+        for name, param in base_brain.named_parameters()
+    }
+
+    # 4. Define the Pure Rollout Step for ONE Agent
+    def agent_rollout_step(p, obs, mem, pos, heading, life, b_map, mask):
+        # A. Brain computes action
+        action, new_mem = functional_call(base_brain, p, (obs, mem))
         
-        _, data = load_champion(GeneticColonySpecies, checkpoint_path, device=DEVICE)
+        # B. Physics engine
+        new_pos, new_heading, new_life, new_map, ate_food = FunctionalWorld.single_step(
+            action, pos, heading, life, b_map, 
+            torch.tensor([[0, -1], [1, 0], [0, 1], [-1, 0]], device=DEVICE), # forward_vectors
+            LIFE_DECAY, LIFE_REWARD, MAX_LIFE
+        )
+        
+        # C. Camera gets new frame using your precomputed tables
+        new_obs = FunctionalWorld.get_single_observation(
+            new_pos, new_heading, new_life, new_map, 
+            world.rotated_offsets, world.los_blockers, mask, MAX_LIFE
+        )
+        
+        return new_obs, new_mem, new_pos, new_heading, new_life, new_map, ate_food
 
-        champion_W1   = data["W1"].to(DEVICE)
-        champion_b1   = data["b1"].to(DEVICE)
-        champion_W2   = data["W2"].to(DEVICE)
-        champion_b2   = data["b2"].to(DEVICE)
-        champion_W_rec = data["W_rec"].to(DEVICE)
-
-        # Broadcast champion weights into the entire population
-        # They'll diverge through mutation — this just gives everyone
-        # a head start from a known-good solution
-        with torch.no_grad():
-            brain.W1.copy_(champion_W1.unsqueeze(0).expand(pop_size, -1, -1))
-            brain.b1.copy_(champion_b1.unsqueeze(0).expand(pop_size, -1, -1))
-            brain.W2.copy_(champion_W2.unsqueeze(0).expand(pop_size, -1, -1))
-            brain.b2.copy_(champion_b2.unsqueeze(0).expand(pop_size, -1, -1))
-            brain.W_rec.copy_(champion_W_rec.unsqueeze(0).expand(pop_size, -1, -1))
-
-        if debug_logs == True:
-            print(f"[Train] Population seeded. Mutation will diversify from here.")
-
+    # 5. VMAP & Compile the Step
+    if DEBUG_LOGS: print("Compiling Batched Step Kernel...")
+    batched_step = vmap(agent_rollout_step, in_dims=(0, 0, 0, 0, 0, 0, 0, 0))
+    compiled_step = torch.compile(batched_step)
     # ==========================================
     # THE OUTER LOOP: GENERATIONS
     # ==========================================
-    for generation in range(num_generations):
-        if debug_logs == True:
-            print(f"\n========== GENERATION {generation} ==========")
+    for generation in range(GENERATIONS):
+        if DEBUG_LOGS: print(f"\n========== GENERATION {generation} ==========")
 
-        # 2. GENERATION RESET
-        # Create a fresh scoreboard for this generation
-        fitness_scores = torch.zeros(pop_size, device=DEVICE)
-        observations = world.get_observations()
-        brain.reset_memory()
+        # A. Ask the legacy world object to generate fresh random maps & positions
+        vision_masks = [torch.ones(num_sensors) for _ in range(POPULATION_SIZE)]
+        world.populate(vision_masks, wall_density=WALL_DENSITY, force_recreate=generation % MAX_GENS_PER_MAP == 0)
+
+        # B. Extract the batched tensors from the world object for the functional loop
+        maps = world.map.clone()
+        positions = world.positions.clone()
+        headings = world.headings.clone()
+        life = world.life_force.clone()
+        masks = world.masks.clone()
+        
+        # C. Initialize purely batched memory and starting observations
+        memory = torch.zeros(POPULATION_SIZE, base_brain.hidden_dim, device=DEVICE)
+        
+        # (Prime the observation using a quick vmap over the starting state)
+        prime_obs = vmap(FunctionalWorld.get_single_observation, in_dims=(0, 0, 0, 0, None, None, 0, None))
+        obs = prime_obs(positions, headings, life, maps, world.rotated_offsets, world.los_blockers, masks, MAX_LIFE)
+
+        fitness_scores = torch.zeros(POPULATION_SIZE, device=DEVICE)
 
         # ==========================================
         # THE INNER LOOP: LIFETIME STEPS
         # ==========================================
-        for step in range(total_steps):
-            # Ask brains for decisions
-            actions = brain(observations)
-            prev_positions = world.positions.clone()
-            
-            # Advance environments
-            observations = world.step(actions)
-            actually_moved = (world.positions[:, 0] != prev_positions[:, 0]) | \
-                             (world.positions[:, 1] != prev_positions[:, 1])
-            
-            fitness_scores = fitness_fn(fitness_scores, world, actions, actually_moved)            
-            # Optional: Print mid-generation update
-            # if step > 0 and step % 100 == 0:
-            #     print_generation_stats(fitness_scores, step, pop_size)
-            
+        for step in range(TOTAL_STEPS):
+            # 1. Execute the incredibly fast compiled kernel
+            obs, memory, positions, headings, life, maps, ate_food = compiled_step(
+                params, obs, memory, positions, headings, life, maps, masks
+            )
+
+            # 2. Add 1 point of fitness for every bug still alive
+            alive_mask = (life > 0)
+            fitness_scores += alive_mask.float()
+
+            # 3. Handle asynchronous food spawning (Outside the compiled kernel)
+            if ate_food.any():
+                # Temporarily pass the updated tensors back to the legacy world 
+                # so it can run its built-in batched spawning logic
+                world.map = maps
+                world.positions = positions
+                world._spawn_food(ate_food)
+                maps = world.map # Retrieve the newly spawned maps
+
         # ==========================================
         # EVOLUTION PHASE
         # ==========================================
-        if debug_logs == True:
-            print(f"\n=== GENERATION {generation} COMPLETE ===")
-
-        # 3. Find the True Champion using their accumulated lifetime score!
         champion_id = torch.argmax(fitness_scores).item()
         best_score = fitness_scores[champion_id].item()
         avg_score = torch.mean(fitness_scores).item()
         
-        if debug_logs == True:
-            print(f"Average Score : {avg_score:.1f}")
-            print(f"Champion Bug ID       : {champion_id} (Score {best_score})")
+        if DEBUG_LOGS:
+            print(f"Average Score   : {avg_score:.1f}")
+            print(f"Champion Bug ID : {champion_id} (Score: {best_score:.1f})")
 
-        # 4. Mutate and Breed the Brains
-        if debug_logs == True:
-            print("Evolving population...")
+        # Mutate the parameters for the next generation
+        params = evolve_params(params, fitness_scores)
 
-        evolve_population(brain, fitness_scores)
-
-        # 5. Reset the Physical World for the next generation
-        # This gives everyone a fresh mMMIN_FOODIN_FOODap, max health, and new food.
-        world.populate(vision_masks)
+    # ==========================================
+    # SAVE THE FINAL CHAMPION
+    # ==========================================
+    if DEBUG_LOGS: print(f"\n=== TRAINING COMPLETE ===")
     
-    if debug_logs == True:
-        print(f"\n=== TRAINING COMPLETE ===")
+    final_champ_id = torch.argmax(fitness_scores).item()
     
+    # Reconstruct a standard state_dict for the base_brain using the champion's slice
+    champion_state_dict = {}
+    for name, param in params.items():
+        champion_state_dict[name] = param[final_champ_id].clone()
+        
+    base_brain.load_state_dict(champion_state_dict)
 
-    # 3. Find the Final Champion
-    champion_id = torch.argmax(fitness_scores).item()
-    if debug_logs == True:
-        best_score = fitness_scores[champion_id].item()
-        print(f"Final Champion Bug ID : {champion_id} (Survived {best_score} steps)")
-        print(f"Champion weights norm: {brain.W1[champion_id].norm():.4f}")
-    
-    save_champion(brain, fitness_scores, world, filename=model_output)
-    print(f"Saved to {model_output}")
+    # Note: world here is just passed so save_champion has environment config
+    save_champion(base_brain, fitness_scores, world, filename=MODEL_OUTPUT)
+    print(f"Saved Champion to {MODEL_OUTPUT}")
+
 
 if __name__ == "__main__":
-    import os
+    torch.set_float32_matmul_precision('high')
     checkpoint = MODEL_OUTPUT if os.path.exists(MODEL_OUTPUT) else None
     train(checkpoint_path=checkpoint)
