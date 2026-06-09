@@ -22,52 +22,18 @@ The primary objective is survival, but "winning" can be defined in multiple ways
 
 ---
 
-## Local Usage & API
+## Step 1: Learning the Environment
 
-The simulation uses a unified `EvolutionaryTrainer` API, making it incredibly simple to test different bug architectures (`BrainBug`, `NeuralBug`, `DynamicBug`), vision cones, and fitness functions locally.
+It was fun learning how NN work and how we use them. It was also cool learning about a Genetic Algorithm to
+create "learned" behavior. However, it wasn't "learning" at a fast enough rate. What I want to explore now
+is what it takes for a bug to learn "food is always on one side". I don't want to encode that, I don't want
+it to be told "this way". I want it to _learn_ that the enviroment it is in has food in _one_ area of the map.
 
-### 1. Training a New Population
+### The World
 
-You can configure and run a training session by utilizing the API directly in `bugs.py`:
+The world consist of an `animal`, `food`, `empty`, and `wall`.
 
-```python
-from bugs import EvolutionaryTrainer, NeuralBug, VISION_CONES, fitness_efficiency
+### The Goal
 
-if __name__ == "__main__":
-    # Configure the training environment
-    trainer = EvolutionaryTrainer(
-        bug_class=NeuralBug,
-        vision_cone=VISION_CONES["Radar"], # 360-degree vision
-        fitness_fn=fitness_efficiency,     # Reward fast eaters
-        generations=50,
-        population_size=1000,
-        trials=3                           # Average the fitness across 3 random maps
-    )
-
-    # Run the evolution and extract the absolute best bug from the final generation
-    champion_bug = trainer.train()
-```
-
-### 2. Saving and Loading Champions
-
-Once a bug has evolved a highly successful brain, you can save it to your local file system as a JSON file. This saves both its "eyes" (vision cone) and its "brain" (neural weights), allowing you to preserve your AI's hard work.
-
-#### Saving a Bug:
-
-```python
-# Save the champion to your hard drive after training completes
-champion_bug.save_to_file("apex_efficiency_radar_bug.json")
-```
-
-#### Loading a Bug:
-
-```python
-# Instantly resurrect a trained bug from disk in a completely new script
-my_champion = NeuralBug.load_from_file("apex_efficiency_radar_bug.json")
-
-# You can now put it directly into a new World and run a Simulation!
-```
-
-### 3. Logs and History
-
-As your AI trains, all generation stats and new "Apex Bug" discoveries are automatically printed to your console and appended to a local `simulation_history.log` file. This provides a permanent, structured record of your experiments so you can compare mutation rates and fitness scores over time.
+This will be a success if a bug can "learn" that it needs to search the map for the area the food is in and
+then it just needs to hang out in that bubble.
