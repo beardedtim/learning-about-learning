@@ -1,0 +1,26 @@
+Starting from checkpoint: bug-fov120-radius5-front5-side2-1.pt
+--- Initializing Functional Simulation on CUDA ---
+Loading champion from bug-fov120-radius5-front5-side2-1.pt...
+Compiling Batched Step Kernel...
+
+========== GENERATION 0 ==========
+Gen 0 / 1000 [DONE]
+    Average Score   : 430.6
+    Champion Bug ID : 152 (Score: 2000.0)
+    Median Score  : 329.0
+    Fitness StdDev: 351.0
+    Total Food Eaten: 56264
+    Final Survivors : 16 / 4096
+    Gen Time : 15.41s (130 steps/sec)
+
+========== GENERATION 1 ==========
+Gen 1 / 1000 [DONE]
+    Average Score   : 438.8
+    Champion Bug ID : 51 (Score: 2000.0)
+    Median Score  : 332.0
+    Fitness StdDev: 357.9
+    Total Food Eaten: 57236
+    Final Survivors : 16 / 4096
+    Gen Time : 16.07s (124 steps/sec)
+
+========== GENERATION 2 ==========

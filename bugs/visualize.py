@@ -650,7 +650,7 @@ def main(checkpoint_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bug Simulation Visualizer")
-    parser.add_argument("checkpoint", nargs="?", default="bug-fov120-radius5-front5-side2.pt",
+    parser.add_argument("checkpoint", nargs="?", default="bug-fov120-radius5-front5-side2-0.pt",
                         help="Path to .pt checkpoint file (e.g. bug.pt)")
     args = parser.parse_args()
 

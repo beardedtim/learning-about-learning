@@ -8,12 +8,12 @@ from species import GeneticColonySpecies
 from checkpoint import save_champion, load_champion
 
 # --- HYPERPARAMETERS ---
-POPULATION_SIZE     = 4096   # Double this if your GPU VRAM can comfortably handle it.
-TOTAL_STEPS         = 2000   # Force them to prove they can survive long-term.
-GENERATIONS         = 1000   #
-TOURNY_SIZE         = 4      # Slightly lower to preserve genetic diversity over a long run.
-MUTATION_RATE       = 0.015  # How mutated does a gene get?
-MUTATION_CHANCE     = 0.1    # How likely any gene is to mutate?
+POPULATION_SIZE     = 4096  #
+TOTAL_STEPS         = 2000   
+GENERATIONS         = 1000   
+TOURNY_SIZE         = 12
+MUTATION_RATE       = 0.008  # 
+MUTATION_CHANCE     = 0.03   # 
 
 # Vision
 SENSOR_RADIUS       = 5 
@@ -22,16 +22,20 @@ SIDE_FOV_RADIUS     = 2
 SPECIES_FOV_DEG     = 120 
 
 # World Complexity
-GRID_SIZE           = 32     #
-WALL_DENSITY        = 0.125   # 12.5% walls
-MAX_GENS_PER_MAP    = 1      # Prevents them from memorizing the layout.
+GRID_SIZE           = 32     
+WALL_DENSITY        = 0.20   #
+MAX_GENS_PER_MAP    = 1      # 
 
 # Survival Mechanics
 MAX_LIFE            = 100.0 
-MIN_FOOD            = 25     
+MIN_FOOD            = 100    # "Training wheels" density. About 10% of the map is food.
 LIFE_DECAY          = 1.0 
 LIFE_REWARD         = 35.0
-MODEL_OUTPUT        = f"bug-fov{SPECIES_FOV_DEG}-radius{SENSOR_RADIUS}-front{FRONT_FOV_RADIUS}-side{SIDE_FOV_RADIUS}.pt"
+
+MODEL_RUN           = 2 # change this to increase the counter so you can see different bug values, like a version
+MODEL_BASE_FILE     = f"bug-fov{SPECIES_FOV_DEG}-radius{SENSOR_RADIUS}-front{FRONT_FOV_RADIUS}-side{SIDE_FOV_RADIUS}"
+MODEL_INPUT         = f"{MODEL_BASE_FILE}-{MODEL_RUN - 1}.pt" 
+MODEL_OUTPUT        = f"{MODEL_BASE_FILE}-{MODEL_RUN}.pt"
 
 DEBUG_LOGS  = True 
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
@@ -111,6 +115,12 @@ def train(checkpoint_path=None):
         name: param.unsqueeze(0).expand(POPULATION_SIZE, *param.shape).clone()
         for name, param in base_brain.named_parameters()
     }
+
+    # warm start diversity: mutate everyone except slot 0
+    for name in params:
+        noise = torch.randn_like(params[name]) * MUTATION_RATE
+        mask = (torch.rand_like(params[name]) < MUTATION_CHANCE).float()
+        params[name][1:] += noise[1:] * mask[1:]
 
     # 4. Define the Pure Rollout Step for ONE Agent
     def agent_rollout_step(p, obs, mem, pos, heading, life, b_map, mask):
@@ -240,5 +250,11 @@ def train(checkpoint_path=None):
 
 if __name__ == "__main__":
     torch.set_float32_matmul_precision('high')
-    checkpoint = MODEL_OUTPUT if os.path.exists(MODEL_OUTPUT) else None
+    checkpoint = MODEL_INPUT if os.path.exists(MODEL_INPUT) else None
+
+    if checkpoint != None:
+        print(f"Starting from checkpoint: {checkpoint}")
+    else:
+        print(f"No checkpoint {MODEL_INPUT} found. Starting fresh")
+
     train(checkpoint_path=checkpoint)
