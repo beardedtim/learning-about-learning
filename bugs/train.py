@@ -13,8 +13,9 @@ TOTAL_STEPS         = 2000
 GENERATIONS         = 1000   
 TOURNY_SIZE         = 12
 MUTATION_RATE       = 0.008  # 
-MUTATION_CHANCE     = 0.03   # 
-
+MUTATION_CHANCE     = 0.05   # 
+WARMSTART_RATE      = 0.05   # bigger than MUTATION_RATE
+WARMSTART_CHANCE    = 0.15   # bigger than MUTATION_CHANCE
 # Vision
 SENSOR_RADIUS       = 5 
 FRONT_FOV_RADIUS    = 5 
@@ -118,8 +119,8 @@ def train(checkpoint_path=None):
 
     # warm start diversity: mutate everyone except slot 0
     for name in params:
-        noise = torch.randn_like(params[name]) * MUTATION_RATE
-        mask = (torch.rand_like(params[name]) < MUTATION_CHANCE).float()
+        noise = torch.randn_like(params[name]) * WARMSTART_RATE
+        mask = (torch.rand_like(params[name]) < WARMSTART_CHANCE).float()
         params[name][1:] += noise[1:] * mask[1:]
 
     # 4. Define the Pure Rollout Step for ONE Agent
