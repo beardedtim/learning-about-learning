@@ -28,7 +28,7 @@ class Config:
     # ── World ─────────────────────────────────────────────────────────────────
     num_envs      = 64          # parallel environments
     grid_size     = 24
-    min_food      = 100
+    min_food      = 50
     food_zones = [
         {"x": 8, "y": 8, "w": 16, "h": 16},  # one big central zone
     ]
