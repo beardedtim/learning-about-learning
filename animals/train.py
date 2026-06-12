@@ -51,7 +51,6 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
 
     # 1. Initialize Environment & Brain
     env = World(world_cfg)
-    num_updates = total_timesteps // (world_cfg.envs * rollout_steps)
 
     raw_obs = env.reset(layout=layout).squeeze(1)
     prev_action = torch.zeros(world_cfg.envs, dtype=torch.long, device=world_cfg.device)
@@ -59,7 +58,7 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
     obs = build_obs_features(raw_obs, prev_action, prev_reward, env.life_force.squeeze(1), max_life_force=world_cfg.max_life_force)
     V = env.obs_size
     obs_dim = NUM_CELL_TYPES * V + ACTION_DIM + 2
-    
+
     brain = ActorCriticBrain(obs_dim=obs_dim, action_dim=3).to(world_cfg.device)
 
     # --- Checkpoint Loading ---
@@ -84,7 +83,7 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
     b_dones = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
     dones = torch.zeros(world_cfg.envs, device=world_cfg.device)
     logger.info(f"Starting Training: {num_updates} updates of {world_cfg.envs * ppo_cfg.rollout_steps} steps each.")
-    
+
     for update in range(1, num_updates + 1):
         # Save the hidden state at the START of the rollout to replay during training
         initial_h, initial_c = h.clone(), c.clone()
@@ -98,33 +97,30 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
 
             # Get action from brain
             with torch.no_grad():
-                action_logits, value, (new_h, new_c) = brain(obs, (h, c))
+                action_logits, value_ext, value_int, (new_h, new_c) = brain(obs, (h, c))
                 dist = Categorical(logits=action_logits)
                 actions = dist.sample()
                 logprobs = dist.log_prob(actions)
 
-            # Store actions and values
+            # Store actions and values (using the extrinsic critic for now)
             b_actions[step] = actions
             b_logprobs[step] = logprobs
-            b_values[step] = value.squeeze(-1)
+            b_values[step] = value_ext.squeeze(-1)
 
             # Step the environment
             next_obs, rewards, next_dones = env.step(actions.unsqueeze(1))
-            
+
             # Format outputs
             raw_obs = next_obs.squeeze(1)
             rewards = rewards.squeeze(1)
+            rewards = rewards.squeeze(-1) if rewards.dim() > 1 else rewards
             dones = next_dones.squeeze(-1) if next_dones.dim() > 1 else next_dones
             b_rewards[step] = rewards
 
             prev_action = actions
             prev_reward = rewards
-            
-            obs = build_obs_features(raw_obs, prev_action, prev_reward, env.life_force.squeeze(1), max_life_force=world_cfg.max_life_force)
 
-            rewards = rewards.squeeze(-1) if rewards.dim() > 1 else rewards
-            dones = next_dones.squeeze(-1) if next_dones.dim() > 1 else next_dones
-            b_rewards[step] = rewards
+            obs = build_obs_features(raw_obs, prev_action, prev_reward, env.life_force.squeeze(1), max_life_force=world_cfg.max_life_force)
 
             # Wipe memory for dead bugs
             if dones.any():
@@ -140,12 +136,12 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
         # ==========================================
         with torch.no_grad():
             # Get the value of the final state to bootstrap the last reward
-            _, next_value, _ = brain(obs, (h, c))
-            next_value = next_value.squeeze(-1)
-            
+            _, next_value_ext, next_value_int, _ = brain(obs, (h, c))
+            next_value = next_value_ext.squeeze(-1)
+
             advantages = torch.zeros_like(b_rewards, device=world_cfg.device)
             lastgaelam = 0
-            
+
             # Calculate backwards through time
             for t in reversed(range(rollout_steps)):
                 if t == rollout_steps - 1:
@@ -154,12 +150,12 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
                 else:
                     nextnonterminal = 1.0 - b_dones[t + 1].float()
                     nextvalues = b_values[t + 1]
-                
+
                 # TD Error
                 delta = b_rewards[t] + gamma * nextvalues * nextnonterminal - b_values[t]
                 # Generalized Advantage
                 advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
-            
+
             returns = advantages + b_values
 
         # ==========================================
@@ -170,7 +166,7 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
         env_obs = b_obs.transpose(0, 1)       # (envs, rollout_steps, obs_dim)
         env_actions = b_actions.transpose(0, 1) # (envs, rollout_steps)
         env_dones = b_dones.transpose(0, 1)
-        
+
         flat_advantages = advantages.transpose(0, 1).flatten()
         flat_returns = returns.transpose(0, 1).flatten()
         flat_old_logprobs = b_logprobs.transpose(0, 1).flatten()
@@ -180,16 +176,16 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
 
         for epoch in range(ppo_epochs):
             # 1. Pass the whole sequence through the brain at once using the starting hidden state!
-            new_logprobs, new_values, entropy = brain.evaluate_actions(
-                env_obs, 
-                (initial_h, initial_c), 
-                env_actions, 
+            new_logprobs, new_values_ext, new_values_int, entropy = brain.evaluate_actions(
+                env_obs,
+                (initial_h, initial_c),
+                env_actions,
                 env_dones
             )
-            
+
             # Flatten outputs to match advantages/returns
             new_logprobs = new_logprobs.flatten()
-            new_values = new_values.flatten()
+            new_values = new_values_ext.flatten()
 
             # 2. Calculate PPO Ratio
             logratio = new_logprobs - flat_old_logprobs
@@ -216,10 +212,10 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
         if update % 10 == 0:
             avg_reward = b_rewards.sum(dim=0).mean().item()
             avg_life = env.life_force.mean().item()
-            
+
             # The human-readable message for the console
             msg = f"Update {update:4d}/{num_updates} | Reward: {avg_reward:6.1f} | Life: {avg_life:5.1f} | V-Loss: {v_loss.item():.3f} | PG-Loss: {pg_loss.item():.3f}"
-            
+
             # The structured dictionary for the JSON file
             metrics = {
                 "update": update,
@@ -231,9 +227,9 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
                 "entropy": round(entropy.item(), 4),
                 "avg_life_force": round(avg_life, 2),
                 "max_life_force": round(env.life_force.max().item(), 2),
-                "reward_mean": rewards.mean(dim=0).item()
+                "reward_mean": rewards.float().mean().item()
             }
-            
+
             # Pass the dictionary using the 'extra' keyword
             logger.info(msg, extra={"metrics": metrics})
 

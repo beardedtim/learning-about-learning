@@ -179,8 +179,9 @@ class WorldConfig:
 
 class World:
     # Values for what we have in our world
-    EMPTY = 0
+    BLOCKED = -2
     WALL = -1
+    EMPTY = 0
     FOOD = 1
     ANIMAL = 2
 
@@ -525,7 +526,7 @@ class World:
         is_wall_along_ray = (ray_vals == self.WALL) & self.ray_len_mask.view(1, 1, *self.ray_len_mask.shape)
         blocked = is_wall_along_ray.any(dim=-1)  # (envs, num_bugs, V)
 
-        return torch.where(blocked, torch.tensor(self.WALL, device=self.cfg.device), target_vals)
+        return torch.where(blocked, torch.tensor(self.BLOCKED, device=self.cfg.device), target_vals)
     
     def step(self, actions: torch.Tensor):
         """
@@ -699,8 +700,10 @@ class World:
             self.bg_color = (15, 15, 20)
             self.wall_color = (35, 35, 45)
             self.wall_highlight = (55, 55, 65)
+            self.blocked_color = (33, 33, 33)
+            self.blocked_highlight = (15, 15, 15)
             self.grid_color = (25, 25, 35)
-            self.food_base_color = (255, 50, 150)
+            self.food_base_color = (50, 255, 150)
             self.food_glow_color = (255, 50, 150, 60)
             self.bug_color = (0, 255, 255)
 
@@ -734,6 +737,11 @@ class World:
                 pygame.draw.rect(self.screen, self.grid_color, rect, 1)
 
                 if val == self.WALL:
+                    pygame.draw.rect(self.screen, self.wall_color, rect)
+                    inner_rect = pygame.Rect(x + 2, y + 2, self.cell_size - 4, self.cell_size - 4)
+                    pygame.draw.rect(self.screen, self.wall_highlight, inner_rect, 1, border_radius=2)
+                
+                elif val == self.BLOCKED:
                     pygame.draw.rect(self.screen, self.wall_color, rect)
                     inner_rect = pygame.Rect(x + 2, y + 2, self.cell_size - 4, self.cell_size - 4)
                     pygame.draw.rect(self.screen, self.wall_highlight, inner_rect, 1, border_radius=2)
@@ -820,6 +828,8 @@ class World:
                 val = self.WALL 
                 if 0 <= obs_row < self.cfg.grid_size and 0 <= obs_col < self.cfg.grid_size:
                     val = grid[obs_row, obs_col]
+                else:
+                    val = self.BLOCKED
 
                 # Line-of-sight check
                 ray_pts = self.ray_offsets[heading, i].cpu().numpy()
@@ -828,12 +838,16 @@ class World:
                     ry = bug_row + ray_pts[j, 0]
                     rx = bug_col + ray_pts[j, 1]
                     if not (0 <= ry < self.cfg.grid_size and 0 <= rx < self.cfg.grid_size):
-                        continue
+                        val = self.BLOCKED
+                        break
                     if grid[ry, rx] == self.WALL:
                         val = self.WALL
                         break
-
+                    if grid[ry, rx] == self.BLOCKED:
+                        val = self.BLOCKED
+                        break
                 if val == self.WALL:   color = (100, 100, 100)
+                elif val == self.BLOCKED: color = (33, 33, 33)
                 elif val == self.FOOD: color = self.ui_success
                 else:                  color = (30, 30, 35)
 

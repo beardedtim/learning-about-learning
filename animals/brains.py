@@ -40,7 +40,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical          # for discrete actions
 # from torch.distributions import Normal             # swap in for continuous
-
+torch.set_float32_matmul_precision('high')
 
 # ── tuneable hyper-params ────────────────────────────────────────────────────
 # NOTE: OBS_DIM is no longer a free constant -- it MUST match the environment.
@@ -137,6 +137,7 @@ class ActorCriticBrain(nn.Module):
 
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        rnd_out_dim = 128
 
         # ── 1. Sensory Encoder ───────────────────────────────────────────────
         # Compresses raw sensor floats into a learned embedding.
@@ -189,35 +190,92 @@ class ActorCriticBrain(nn.Module):
             # No activation — value is unbounded
         )
 
+        # The Target: Fixed random projection. Never trains.
+        self.rnd_target = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, rnd_out_dim)
+        )
+        for param in self.rnd_target.parameters():
+            param.requires_grad = False
+            
+        # The Predictor: Tries to guess the Target's output.
+        self.rnd_predictor = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim), # Slightly deeper to ensure capacity
+            nn.ELU(),
+            nn.Linear(hidden_dim, rnd_out_dim)
+        )
+
+        # ── 5. Dual Critic Heads ─────────────────────────────────────────────
+        # We need two separate value estimates because extrinsic reward (staying alive)
+        # and intrinsic reward (novelty) have totally different dynamics.
+        
+        # Predicts return of the standard environment reward
+        self.critic_ext = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ELU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+        
+        # Predicts return of the RND novelty reward
+        self.critic_int = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ELU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
     # ── Forward pass ─────────────────────────────────────────────────────────
     def forward(
         self,
-        obs:    torch.Tensor,   # (batch, obs_dim)  — current sensory snapshot
-        hidden: tuple[torch.Tensor, torch.Tensor],  # (h, c) each (num_layers, batch, hidden_dim)
-    ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
+        obs:    torch.Tensor,   
+        hidden: tuple[torch.Tensor, torch.Tensor],  
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple]:
         """
-        One timestep of cognition.
-
         Returns
         -------
-        action_logits  : (batch, action_dim)  — raw scores for each action
-        value          : (batch, 1)           — critic's estimate of V(s)
-        new_hidden     : tuple (h, c)         — updated memory state
+        action_logits  : (batch, action_dim) 
+        value_ext      : (batch, 1)  — extrinsic value estimate
+        value_int      : (batch, 1)  — intrinsic value estimate
+        new_hidden     : tuple (h, c)
         """
+        embed = self.encoder(obs)                       
 
-        # Encode raw sensors → embedding
-        embed = self.encoder(obs)                       # (batch, embed_dim)
+        embed = embed.unsqueeze(1)                          
+        lstm_out, new_hidden = self.memory(embed, hidden)   
+        lstm_out = lstm_out.squeeze(1)                      
 
-        # LSTM expects (batch, seq_len, features); seq_len=1 for single-step
-        embed = embed.unsqueeze(1)                          # (batch, 1, embed_dim)
-        lstm_out, new_hidden = self.memory(embed, hidden)   # new_hidden is (h, c)
-        lstm_out = lstm_out.squeeze(1)                      # (batch, hidden_dim)
+        action_logits = self.actor(lstm_out)            
+        
+        # Both critics read the same LSTM state
+        value_ext = self.critic_ext(lstm_out)           
+        value_int = self.critic_int(lstm_out)           
 
-        # Actor and critic read from lstm_out (== h[t] projected through output weights)
-        action_logits = self.actor(lstm_out)            # (batch, action_dim)
-        value         = self.critic(lstm_out)           # (batch, 1)
+        return action_logits, value_ext, value_int, new_hidden
 
-        return action_logits, value, new_hidden
+    # ── Helper: select an action ──────────────────────────────────────────────
+    @torch.no_grad()
+    def act(
+        self,
+        obs:    torch.Tensor,
+        hidden: tuple[torch.Tensor, torch.Tensor],
+        greedy: bool = False,
+    ) -> tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, tuple]:
+        """
+        Added returning intrinsic reward so the environment loop can use it.
+        """
+        logits, value_ext, value_int, new_hidden = self.forward(obs, hidden)
+        dist = Categorical(logits=logits)
+
+        action = dist.probs.argmax(dim=-1) if greedy else dist.sample()
+
+        # Calculate Novelty (Intrinsic Reward) on the fly
+        target_feat = self.rnd_target(obs)
+        pred_feat = self.rnd_predictor(obs)
+        intrinsic_reward = torch.mean((pred_feat - target_feat)**2, dim=-1, keepdim=True)
+
+        return action.item(), value_ext, value_int, intrinsic_reward, new_hidden
 
     # ── Helper: build the initial hidden state ────────────────────────────────
     def init_hidden(self, batch_size: int = 1, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor]:
@@ -229,80 +287,59 @@ class ActorCriticBrain(nn.Module):
     
         return zeros(), zeros()   # (h, c)
 
-    # ── Helper: select an action ──────────────────────────────────────────────
-    @torch.no_grad()
-    def act(
-        self,
-        obs:    torch.Tensor,
-        hidden: tuple[torch.Tensor, torch.Tensor],
-        greedy: bool = False,
-    ) -> tuple[int, torch.Tensor, tuple]:
-        """
-        Convenience wrapper for environment interaction (no grad needed).
-
-        Returns
-        -------
-        action     : int
-        value      : scalar tensor  (useful for GAE / rollout logging)
-        new_hidden : updated memory state to pass in at the next timestep
-        """
-        logits, value, new_hidden = self.forward(obs, hidden)
-        dist = Categorical(logits=logits)
-
-        action = dist.probs.argmax(dim=-1) if greedy else dist.sample()
-
-        return action.item(), value, new_hidden
-
-    # ── Helper: evaluate stored actions (used during the PPO update) ──────────
+    # ── Helper: evaluate stored actions ───────────────────────────────────────
+    @torch.compile
     def evaluate_actions(
         self,
-        obs:     torch.Tensor,   # (batch, seq_len, obs_dim) — a rollout chunk
-        hidden:  tuple[torch.Tensor, torch.Tensor],  # (h, c) at START of chunk
-        actions: torch.Tensor,   # (batch, seq_len) — actions that were taken
-        dones:   torch.Tensor,   # (batch, seq_len) — dead bugs mask
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Re-run a stored rollout through the current weights, wiping LSTM 
-        hidden states mid-sequence for any environment that triggered a 'done'.
-        """
+        obs:     torch.Tensor,   
+        hidden:  tuple[torch.Tensor, torch.Tensor],  
+        actions: torch.Tensor,   
+        dones:   torch.Tensor,   
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        
         batch, seq_len, _ = obs.shape
         h, c = hidden
 
-        # 1. Encode all timesteps at once — still highly efficient
         embed = self.encoder(obs.reshape(batch * seq_len, -1))
         embed = embed.reshape(batch, seq_len, -1)
 
         lstm_outs = []
 
-        # 2. Loop through time to manually manage LSTM memory
         for t in range(seq_len):
-            # step_dones indicates if the bug died right before this step
             step_dones = dones[:, t]
-
-            # Reshape to (1, batch, 1) so it broadcasts over (num_layers, batch, hidden_dim)
             mask = 1.0 - step_dones.view(1, batch, 1)
 
-            # Wipe memory for dead bugs
             h = h * mask
             c = c * mask
 
-            # Extract the single timestep embedding: shape (batch, 1, embed_dim)
             step_embed = embed[:, t, :].unsqueeze(1)
-
-            # Step the LSTM forward by exactly 1 timestep
             step_out, (h, c) = self.memory(step_embed, (h, c))
-            
             lstm_outs.append(step_out)
 
-        # 3. Stitch the sequence back together along the time dimension
-        lstm_out = torch.cat(lstm_outs, dim=1)  # (batch, seq_len, hidden_dim)
+        lstm_out = torch.cat(lstm_outs, dim=1)  
 
-        # 4. Proceed with actor/critic as normal
-        logits = self.actor(lstm_out)                   # (batch, seq_len, action_dim)
-        values = self.critic(lstm_out)                  # (batch, seq_len, 1)
+        logits = self.actor(lstm_out)                   
+        values_ext = self.critic_ext(lstm_out)                  
+        values_int = self.critic_int(lstm_out)                  
 
         dist      = Categorical(logits=logits)
-        log_probs = dist.log_prob(actions)              # (batch, seq_len)
-        entropy   = dist.entropy().mean()               # scalar
+        log_probs = dist.log_prob(actions)              
+        entropy   = dist.entropy().mean()               
 
-        return log_probs, values, entropy
+        return log_probs, values_ext, values_int, entropy
+    
+    def compute_rnd_loss(self, obs: torch.Tensor) -> torch.Tensor:
+        """
+        Called during the PPO update phase. 
+        Minimizes the prediction error on states we have seen in the rollout.
+        """
+        # Flatten time and batch dimensions for a clean pass
+        obs = obs.reshape(-1, obs.shape[-1]) 
+        
+        # Target requires no grad, Predictor does
+        target_feat = self.rnd_target(obs).detach()
+        pred_feat = self.rnd_predictor(obs)
+        
+        rnd_loss = torch.mean((pred_feat - target_feat)**2)
+    
+        return rnd_loss
