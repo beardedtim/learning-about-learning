@@ -320,20 +320,27 @@ def crawl():
     """
     Stage 1: A simple biome dense with food to allow the agent to establish base navigation and eating mechanics.
     """
-    crawl_biome = BiomeConfig(
-        x=2, y=2, width=11, height=11,
-        food_refresh_rate=0.05,  # 5% chance per empty tile per tick
+    crawl_biome_left = BiomeConfig(
+        x=2, y=2, width=6, height=20,
+        food_refresh_rate=0.5, 
         eating_bonus=100.0, 
-        max_food=15
+        max_food=8
+    )
+
+    crawl_biome_right = BiomeConfig(
+        x=16, y=2, width=6, height=20,
+        food_refresh_rate=0.5, 
+        eating_bonus=100.0, 
+        max_food=8
     )
 
     world_cfg_crawl = WorldConfig(
-        grid_size=32,
+        grid_size=24,
         envs=32,
-        biomes=[crawl_biome],
+        biomes=[crawl_biome_right, crawl_biome_left],
         bug_sensors=get_sensors(),
         num_bugs=1,
-        min_food=15,
+        min_food=8,
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
 
@@ -362,16 +369,31 @@ def walk():
     """
     Stage 2: Introduces standard mazes and obstacles on top of the established eating behaviors.
     """
-    walk_biome = BiomeConfig(
-        x=2, y=2, width=11, height=11, 
-        food_refresh_rate=0.3,
-        eating_bonus=20.0,
+    biome_1 = BiomeConfig(
+        x=2, y=2, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
+    )
+
+    biome_2 = BiomeConfig(
+        x=22, y=2, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
+    )
+
+    biome_3 = BiomeConfig(
+        x=12, y=22, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
     )
 
     world_cfg_walk = WorldConfig(
-        grid_size=20,
+        grid_size=32,
         envs=32,
-        biomes=[walk_biome],
+        biomes=[biome_1, biome_2, biome_3],
         bug_sensors=get_sensors(),
         num_bugs=1,
         device='cuda' if torch.cuda.is_available() else 'cpu',
@@ -402,25 +424,28 @@ def run():
     Stage 3: Complex layout utilizing distinct biome zones (Jackpot, Steady, Desert) with varied rulesets.
     """
     jackpot_biome = BiomeConfig(
-        x=2, y=2, width=6, height=6,
-        food_refresh_rate=0.02,
+        x=2, y=2, width=10, height=10,
+        food_refresh_rate=0.01,
         eating_bonus=60.0,
+        max_food=15
     )
 
     steady_biome = BiomeConfig(
-        x=16, y=2, width=6, height=6,
+        x=26, y=2, width=12, height=12,
         food_refresh_rate=0.4,
-        eating_bonus=8.0, 
+        eating_bonus=8.0,
+        max_food=3
     )
 
     desert_biome = BiomeConfig(
-        x=9, y=16, width=6, height=6,
-        food_refresh_rate=0.01,
-        eating_bonus=2.0,
+        x=10, y=26, width=20, height=10,
+        food_refresh_rate=0.001,
+        eating_bonus=100.0,
+        max_food=1
     )
 
     world_cfg_run = WorldConfig(
-        grid_size=24,
+        grid_size=40,
         envs=32,
         biomes=[jackpot_biome, steady_biome, desert_biome],
         bug_sensors=get_sensors(),

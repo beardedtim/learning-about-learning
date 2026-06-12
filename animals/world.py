@@ -441,36 +441,47 @@ class World:
         self.map[env_indices, spawn_rows, spawn_cols] = self.FOOD
     
     def _spawn_food(self):
-        # 1. Generate random rolls for every cell
+        # 1. Generate random rolls for every cell globally
         rand_spawns = torch.rand((self.cfg.envs, self.cfg.grid_size, self.cfg.grid_size), device=self.cfg.device)
 
-        # 2. Identify all valid empty spaces
+        # 2. Identify all valid empty spaces globally
         empty_spaces = (self.map == self.EMPTY)
 
-        # 3. Create the baseline spawn mask (chance hit & space is empty)
-        spawn_mask = empty_spaces & (rand_spawns < self.food_refresh_map)
+        # 3. We will build the spawn mask biome by biome to enforce exact caps
+        spawn_mask = torch.zeros((self.cfg.envs, self.cfg.grid_size, self.cfg.grid_size), dtype=torch.bool, device=self.cfg.device)
 
-        # 4. ENFORCE BIOME CAPS (The new logic!)
-        # We check each biome's boundaries to see if it is currently full
         for biome in self.cfg.biomes:
             y_start, y_end = biome.y, biome.y + biome.height
             x_start, x_end = biome.x, biome.x + biome.width
 
-            # Extract just the current biome's physical area from the map
+            # Extract the random rolls and empty spaces for just this biome
+            biome_rands = rand_spawns[:, y_start:y_end, x_start:x_end].clone()
+            biome_empty = empty_spaces[:, y_start:y_end, x_start:x_end]
+
+            # Force non-empty spaces to 1.0 so they automatically fail the probability check
+            biome_rands[~biome_empty] = 1.0
+
+            # Flatten the spatial dimensions so we can rank the rolls
+            flat_rands = biome_rands.reshape(self.cfg.envs, -1)
+
+            # Calculate exactly how much room is left in this biome before hitting the cap
             biome_area = self.map[:, y_start:y_end, x_start:x_end]
+            current_food_counts = (biome_area == self.FOOD).sum(dim=(1, 2))
+            allowed_spawns = torch.clamp(biome.max_food - current_food_counts, min=0)
 
-            # Count how much food currently exists in this specific biome for ALL environments
-            # dim=(1, 2) collapses the rows/cols, leaving us with a 1D tensor of shape (envs,)
-            current_food_counts = (biome_area == self.FOOD).sum(dim=(1, 2)) 
+            # Rank the random rolls (0 is the lowest/most likely roll)
+            sorted_indices = torch.argsort(flat_rands, dim=1)
+            ranks = torch.argsort(sorted_indices, dim=1)
 
-            # Identify which specific parallel environments have hit the max capacity for THIS biome
-            capped_envs = (current_food_counts >= biome.max_food) 
+            # A spawn is valid IF the random roll hit the refresh rate AND its rank is within the remaining capacity
+            valid_prob = flat_rands < biome.food_refresh_rate
+            within_cap = ranks < allowed_spawns.unsqueeze(1)
 
-            # For any environment that is capped, strictly forbid new spawns in this biome's area
-            if capped_envs.any():
-                spawn_mask[capped_envs, y_start:y_end, x_start:x_end] = False
+            # Combine conditions and reshape back to the biome grid shape
+            flat_spawn = valid_prob & within_cap
+            spawn_mask[:, y_start:y_end, x_start:x_end] = flat_spawn.reshape(self.cfg.envs, biome.height, biome.width)
 
-        # 5. Apply the final, capped food spawns to the map
+        # 4. Apply the final, strictly capped food spawns to the map
         self.map[spawn_mask] = self.FOOD
 
     def reset(self, layout: str = "easy"):

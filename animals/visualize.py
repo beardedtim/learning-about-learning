@@ -99,21 +99,29 @@ if __name__ == '__main__':
     #     bug_sensors=get_sensors(),
     #     device='cpu' 
     # )
-    crawl_biome = BiomeConfig(
-        x=2, y=2, width=11, height=11,    # covers most of a 15x15 grid -> food is everywhere
-        food_refresh_rate=0.3,             # high refresh -> food rarely runs out, low pressure
-        eating_bonus=20.0,
+    crawl_biome_left = BiomeConfig(
+        x=2, y=2, width=6, height=20,
+        food_refresh_rate=0.5, 
+        eating_bonus=100.0, 
+        max_food=4
     )
 
-    cfg = WorldConfig(
-        grid_size=32,
-        envs=1,
-        biomes=[crawl_biome],
+    crawl_biome_right = BiomeConfig(
+        x=16, y=2, width=6, height=20,
+        food_refresh_rate=0.5, 
+        eating_bonus=100.0, 
+        max_food=4
+    )
+
+    world_cfg_crawl = WorldConfig(
+        grid_size=24,
+        envs=32,
+        biomes=[crawl_biome_right, crawl_biome_left],
         bug_sensors=get_sensors(),
         num_bugs=1,
-        min_food=15,
+        min_food=8,
         device='cpu',
     )
 
     print("Booting visualizer...")
-    render_trained_brain(cfg, load_path="stage1_crawl.pt")
+    render_trained_brain(world_cfg_crawl, load_path="stage1_crawl.pt")
