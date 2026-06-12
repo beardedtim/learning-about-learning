@@ -23,10 +23,10 @@ VISION_COLORS = {
 }
 
 
-def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt"):
+def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt", layout = "easy"):
     env = World(cfg)
     
-    raw_obs = env.reset(layout="easy").squeeze(1)
+    raw_obs = env.reset(layout=layout).squeeze(1)
     V = env.obs_size
     obs_dim = NUM_CELL_TYPES * V + ACTION_DIM + 2
     
@@ -76,11 +76,10 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt"):
                 new_c[:, dones, :] = 0.0
                 prev_action[dones] = 0
                 prev_reward[dones] = 0.0
-                env.reset()
 
             action_taken = actions[0].item()
 
-            env.render(env_idx=0, fps=15, last_action=action_taken)
+            env.render(env_idx=0, fps=15, last_action=action_taken, layout=layout)
 
 
             h, c = new_h, new_c
@@ -88,30 +87,19 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt"):
     pygame.quit()
 
 if __name__ == '__main__':
-    # fertile_biome = BiomeConfig(x=20, y=4, width=5, height=5, food_refresh_rate=0.75, eating_bonus=5.0)
-    # # rare_but_rich_biome = BiomeConfig(x=2, y=2, width=10, height=10, food_refresh_rate=0.01, eating_bonus=100.0)
-    
-    # cfg = WorldConfig(
-    #     grid_size=36, 
-    #     envs=1, 
-    #     biomes=[fertile_biome, rare_but_rich_biome], 
-    #     num_bugs=1, 
-    #     min_food=10,
-    #     bug_sensors=get_sensors(),
-    #     device='cpu' 
-    # )
+    # Crawl Config
     crawl_biome_left = BiomeConfig(
         x=2, y=2, width=6, height=20,
-        food_refresh_rate=0.5, 
-        eating_bonus=100.0, 
-        max_food=4
+        food_refresh_rate=0.1, 
+        eating_bonus=40.0, 
+        max_food=8
     )
 
     crawl_biome_right = BiomeConfig(
         x=16, y=2, width=6, height=20,
-        food_refresh_rate=0.5, 
-        eating_bonus=100.0, 
-        max_food=4
+        food_refresh_rate=0.1, 
+        eating_bonus=40.0, 
+        max_food=8
     )
 
     world_cfg_crawl = WorldConfig(
@@ -125,4 +113,74 @@ if __name__ == '__main__':
     )
 
     print("Booting visualizer...")
-    render_trained_brain(world_cfg_crawl, load_path="stage1_crawl.pt")
+    render_trained_brain(world_cfg_crawl, load_path="stage1_crawl.pt", layout="easy")
+
+    # Walk Config
+    # biome_1 = BiomeConfig(
+    #     x=2, y=2, width=8, height=8,
+    #     food_refresh_rate=0.05,
+    #     eating_bonus=30.0,
+    #     max_food=3
+    # )
+
+    # biome_2 = BiomeConfig(
+    #     x=22, y=2, width=8, height=8,
+    #     food_refresh_rate=0.05,
+    #     eating_bonus=30.0,
+    #     max_food=3
+    # )
+
+    # biome_3 = BiomeConfig(
+    #     x=12, y=22, width=8, height=8,
+    #     food_refresh_rate=0.05,
+    #     eating_bonus=30.0,
+    #     max_food=3
+    # )
+
+    # world_cfg_walk = WorldConfig(
+    #     grid_size=32,
+    #     envs=32,
+    #     min_food=1,
+    #     biomes=[biome_1, biome_2, biome_3],
+    #     bug_sensors=get_default_sensors(),
+    #     num_bugs=1,
+    #     device='cuda' if torch.cuda.is_available() else 'cpu',
+    # )
+
+    # print("Booting visualizer...")
+    # render_trained_brain(world_cfg_walk, load_path="stage2_walk_medium.pt", layout="medium")
+    
+    # Hard
+    # jackpot_biome = BiomeConfig(
+    #     x=2, y=2, width=10, height=10,
+    #     food_refresh_rate=0.01,
+    #     eating_bonus=60.0,
+    #     max_food=7
+    # )
+
+    # steady_biome = BiomeConfig(
+    #     x=26, y=2, width=12, height=12,
+    #     food_refresh_rate=0.4,
+    #     eating_bonus=8.0,
+    #     max_food=3
+    # )
+
+    # desert_biome = BiomeConfig(
+    #     x=10, y=26, width=20, height=10,
+    #     food_refresh_rate=0.001,
+    #     eating_bonus=75.0,
+    #     max_food=1
+    # )
+
+    # world_cfg_run = WorldConfig(
+    #     grid_size=40,
+    #     envs=32,
+    #     biomes=[jackpot_biome, steady_biome, desert_biome],
+    #     bug_sensors=get_default_sensors(),
+    #     min_food=5,
+    #     num_bugs=1,
+    #     device='cpu',
+    # )
+
+    # print("Booting visualizer...")
+    # render_trained_brain(world_cfg_run, load_path="stage2_walk_medium.pt", layout="hard")

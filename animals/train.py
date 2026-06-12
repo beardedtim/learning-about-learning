@@ -322,14 +322,14 @@ def crawl():
     """
     crawl_biome_left = BiomeConfig(
         x=2, y=2, width=6, height=20,
-        food_refresh_rate=0.5, 
+        food_refresh_rate=0.1, 
         eating_bonus=40.0, 
         max_food=8
     )
 
     crawl_biome_right = BiomeConfig(
         x=16, y=2, width=6, height=20,
-        food_refresh_rate=0.5, 
+        food_refresh_rate=0.1, 
         eating_bonus=40.0, 
         max_food=8
     )
@@ -347,7 +347,7 @@ def crawl():
     ppo_cfg_crawl = PPOConfig(
         rollout_steps=256,
         ent_coef=0.02,
-        ppo_epochs=4,
+        ppo_epochs=8,
         lr=3e-4,
     )
 
@@ -396,6 +396,7 @@ def walk():
         biomes=[biome_1, biome_2, biome_3],
         bug_sensors=get_default_sensors(),
         num_bugs=1,
+        min_food=1,
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
 
@@ -414,7 +415,8 @@ def walk():
         world_cfg=world_cfg_walk,
         ppo_cfg=ppo_cfg_walk,
         save_path="stage2_walk_medium.pt",
-        load_path="stage1_crawl.pt",
+        load_path="stage1_crawl.pt", # If you want to load the previous crawl
+        # load_path="stage2_walk_medium.pt", # If you want to load previous walk_medium runs
         total_timesteps=20_000_000,
         layout="medium"
     )
@@ -427,7 +429,7 @@ def run():
         x=2, y=2, width=10, height=10,
         food_refresh_rate=0.01,
         eating_bonus=60.0,
-        max_food=15
+        max_food=7
     )
 
     steady_biome = BiomeConfig(
@@ -440,7 +442,7 @@ def run():
     desert_biome = BiomeConfig(
         x=10, y=26, width=20, height=10,
         food_refresh_rate=0.001,
-        eating_bonus=100.0,
+        eating_bonus=75.0,
         max_food=1
     )
 
@@ -449,7 +451,7 @@ def run():
         envs=32,
         biomes=[jackpot_biome, steady_biome, desert_biome],
         bug_sensors=get_default_sensors(),
-        min_food=10,
+        min_food=5,
         num_bugs=1,
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
@@ -468,8 +470,9 @@ def run():
         world_cfg=world_cfg_run,
         ppo_cfg=ppo_cfg_run,
         save_path="stage3_run.pt",
+        # load_path="stage3_run.pt",
         load_path="stage2_walk_hard.pt",
-        total_timesteps=1_000_000,
+        total_timesteps=20_000_000,
         layout="hard"
     )
 

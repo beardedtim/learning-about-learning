@@ -232,43 +232,28 @@ class World:
 
     def _generate_map(self, layout: str = "hard"):
         """
-        Generates the map according to a difficulty "layout":
-          - "easy":   one big open room (just the outer walls). Great for
-                      sanity-checking that the bug can find food/move at all.
-          - "medium": a handful of large rooms connected by corridors.
-          - "hard":   the original densely-packed small-room dungeon
-                      (uses cfg.num_rooms / min_room_size / max_room_size).
-
-        Biome placement (where food spawns/refreshes) is independent of the
-        wall layout -- it's still driven entirely by cfg.biomes, so the same
-        biome config can be tested against easy/medium/hard layouts.
+        Routes the layout difficulty to the correct map generation parameters.
         """
         self.layout = layout
 
         if layout == "easy":
+            # Just the outer walls, one massive open space.
             self._generate_open_map()
         elif layout == "medium":
-            self._generate_rooms_map(
-                num_rooms=3,
-                min_room_size=max(8, self.cfg.grid_size // 3),
-                max_room_size=max(10, self.cfg.grid_size // 2),
-            )
+            # A 2x2 grid. Creates 4 massive rooms that consume almost all 
+            # the available space, joined by short corridors. Mostly open.
+            self._generate_grid_dungeon(grid_dim=2, min_ratio=0.6, max_ratio=0.9)
         elif layout == "hard":
-            self._generate_rooms_map(
-                num_rooms=self.cfg.num_rooms,
-                min_room_size=self.cfg.min_room_size,
-                max_room_size=self.cfg.max_room_size,
-            )
+            # Dynamic grid size based on map scale (e.g., 3x3 or 5x5). 
+            # Creates many smaller rooms connected by a dense web of hallways.
+            dim = max(3, self.cfg.grid_size // 8)
+            self._generate_grid_dungeon(grid_dim=dim, min_ratio=0.4, max_ratio=0.7)
         else:
             raise ValueError(f"Unknown map layout '{layout}'. Expected 'easy', 'medium', or 'hard'.")
 
         self._setup_biomes()
 
     def _generate_open_map(self):
-        """
-        "Easy" preset: a single open room bordered by walls. No corridors,
-        no obstacles -- just the bug, the biomes, and open floor.
-        """
         self.map = torch.full(
             (self.cfg.envs, self.cfg.grid_size, self.cfg.grid_size),
             self.EMPTY, dtype=torch.long, device=self.cfg.device,
@@ -280,93 +265,125 @@ class World:
         self.map[:, :, 0] = self.WALL
         self.map[:, :, -1] = self.WALL
 
-    def _generate_rooms_map(self, num_rooms: int, min_room_size: int, max_room_size: int):
+    def _generate_grid_dungeon(self, grid_dim: int, min_ratio: float, max_ratio: float):
         """
-        Generates a batched procedural dungeon map using tensor broadcasting.
-        Starts with solid walls, punches out `num_rooms` rooms (sized between
-        min_room_size and max_room_size), and connects them with corridors.
-
-        This is the generic room/corridor generator used by both the
-        "medium" and "hard" presets -- only the room count/size ranges
-        differ between them.
+        Generates a mathematically connected dungeon using a Grid Mesh Topology.
+        Divides the map into 'grid_dim x grid_dim' cells. Generates one room per cell,
+        and carves corridors to the adjacent right and down cells.
         """
-        # Guard against degenerate ranges (e.g. medium preset on a tiny grid)
-        min_room_size = max(2, min(min_room_size, self.cfg.grid_size - 2))
-        max_room_size = max(min_room_size + 1, min(max_room_size, self.cfg.grid_size - 1))
-
         # 1. Fill the entire map with walls
         self.map = torch.full((self.cfg.envs, self.cfg.grid_size, self.cfg.grid_size), 
                               self.WALL, dtype=torch.long, device=self.cfg.device)
 
-        # 2. Generate random room dimensions and coordinates for all envs simultaneously
-        # Shape: (envs, num_rooms)
-        rooms_w = torch.randint(min_room_size, max_room_size, 
-                                (self.cfg.envs, num_rooms), device=self.cfg.device)
-        rooms_h = torch.randint(min_room_size, max_room_size, 
-                                (self.cfg.envs, num_rooms), device=self.cfg.device)
+        cell_size = self.cfg.grid_size // grid_dim
         
-        # Ensure rooms don't spawn out of bounds (padding by 1 to keep outer walls intact)
-        rooms_x = torch.randint(1, self.cfg.grid_size - max_room_size, 
-                                (self.cfg.envs, num_rooms), device=self.cfg.device)
-        rooms_y = torch.randint(1, self.cfg.grid_size - max_room_size, 
-                                (self.cfg.envs, num_rooms), device=self.cfg.device)
+        # Fallback if someone requests a grid dimension that is physically too small for the map
+        if cell_size < 4:
+            grid_dim = 1
+            cell_size = self.cfg.grid_size
 
-        # 3. Create a 2D coordinate grid for the whole map
+        num_rooms = grid_dim * grid_dim
+
+        # Calculate absolute pixel sizes for rooms based on the layout's ratio
+        min_room_size = max(2, int(cell_size * min_ratio))
+        max_room_size = max(min_room_size + 1, int(cell_size * max_ratio))
+
+        # 2. Generate coordinates for the invisible grid cells
+        gy, gx = torch.meshgrid(
+            torch.arange(grid_dim, device=self.cfg.device), 
+            torch.arange(grid_dim, device=self.cfg.device), 
+            indexing='ij'
+        )
+        gx = gx.flatten().view(1, num_rooms)
+        gy = gy.flatten().view(1, num_rooms)
+
+        base_x = gx * cell_size
+        base_y = gy * cell_size
+
+        # 3. Randomize room dimensions
+        rooms_w = torch.randint(min_room_size, max_room_size, (self.cfg.envs, num_rooms), device=self.cfg.device)
+        rooms_h = torch.randint(min_room_size, max_room_size, (self.cfg.envs, num_rooms), device=self.cfg.device)
+
+        # 4. Randomize room placement within their designated grid cell bounds
+        avail_x = torch.clamp(cell_size - 1 - rooms_w, min=0)
+        avail_y = torch.clamp(cell_size - 1 - rooms_h, min=0)
+
+        rand_x = torch.rand((self.cfg.envs, num_rooms), device=self.cfg.device)
+        rand_y = torch.rand((self.cfg.envs, num_rooms), device=self.cfg.device)
+
+        rooms_x = base_x + 1 + (rand_x * (avail_x + 1).float()).long()
+        rooms_y = base_y + 1 + (rand_y * (avail_y + 1).float()).long()
+
+        # 5. Build coordinate masks for tensor broadcasting
         yy, xx = torch.meshgrid(torch.arange(self.cfg.grid_size, device=self.cfg.device), 
                                 torch.arange(self.cfg.grid_size, device=self.cfg.device), indexing='ij')
-        
-        # Reshape for 4D broadcasting: (1, 1, grid_size, grid_size)
-        xx = xx.view(1, 1, self.cfg.grid_size, self.cfg.grid_size)
-        yy = yy.view(1, 1, self.cfg.grid_size, self.cfg.grid_size)
 
-        # Reshape room boundaries for 4D broadcasting: (envs, num_rooms, 1, 1)
+        xx_4d = xx.view(1, 1, self.cfg.grid_size, self.cfg.grid_size)
+        yy_4d = yy.view(1, 1, self.cfg.grid_size, self.cfg.grid_size)
+
         rx = rooms_x.view(self.cfg.envs, num_rooms, 1, 1)
         ry = rooms_y.view(self.cfg.envs, num_rooms, 1, 1)
         rw = rooms_w.view(self.cfg.envs, num_rooms, 1, 1)
         rh = rooms_h.view(self.cfg.envs, num_rooms, 1, 1)
 
-        # 4. Punch out the rooms
-        # Build a mask of all spaces that fall inside ANY room
-        room_mask = (xx >= rx) & (xx < rx + rw) & (yy >= ry) & (yy < ry + rh)
-        
-        # Collapse the num_rooms dimension to get the final 2D mask per env
-        is_room = room_mask.any(dim=1)
-        self.map[is_room] = self.EMPTY
+        # 6. Carve the rooms
+        room_mask = (xx_4d >= rx) & (xx_4d < rx + rw) & (yy_4d >= ry) & (yy_4d < ry + rh)
+        self.map[room_mask.any(dim=1)] = self.EMPTY
 
-        # 5. Calculate Room Centers for Corridors
+        # 7. Connect Adjacent Cells with Corridors (Mesh Topology)
         centers_x = rooms_x + (rooms_w // 2)
         centers_y = rooms_y + (rooms_h // 2)
 
-        # Squeeze the extra dimension out for the corridors ---
-        # Shape becomes: (1, grid_size, grid_size)
         xx_3d = xx.squeeze(1)
         yy_3d = yy.squeeze(1)
 
-        # 6. Carve L-shaped Corridors to connect room `i` to room `i+1`
-        for i in range(num_rooms - 1):
-            start_x = centers_x[:, i].view(-1, 1, 1)
-            start_y = centers_y[:, i].view(-1, 1, 1)
-            end_x = centers_x[:, i + 1].view(-1, 1, 1)
-            end_y = centers_y[:, i + 1].view(-1, 1, 1)
+        for y in range(grid_dim):
+            for x in range(grid_dim):
+                current_idx = y * grid_dim + x
 
-            min_x = torch.minimum(start_x, end_x)
-            max_x = torch.maximum(start_x, end_x)
-            min_y = torch.minimum(start_y, end_y)
-            max_y = torch.maximum(start_y, end_y)
+                # Connect Right Neighbor
+                if x < grid_dim - 1:
+                    right_idx = y * grid_dim + (x + 1)
+                    self._carve_corridor(current_idx, right_idx, centers_x, centers_y, xx_3d, yy_3d)
 
-            # Use the newly squeezed 3D coordinates!
-            h_corridor = (yy_3d == start_y) & (xx_3d >= min_x) & (xx_3d <= max_x)
-            v_corridor = (xx_3d == end_x) & (yy_3d >= min_y) & (yy_3d <= max_y)
+                # Connect Down Neighbor
+                if y < grid_dim - 1:
+                    down_idx = (y + 1) * grid_dim + x
+                    self._carve_corridor(current_idx, down_idx, centers_x, centers_y, xx_3d, yy_3d)
 
-            # Mask is now perfectly (envs, grid_size, grid_size)
-            self.map[h_corridor | v_corridor] = self.EMPTY
+        # 8. Explicitly carve out Biomes so food isn't trapped in walls
+        for biome in self.cfg.biomes:
+            y_start = max(1, biome.y)
+            y_end = min(self.cfg.grid_size - 1, biome.y + biome.height)
+            x_start = max(1, biome.x)
+            x_end = min(self.cfg.grid_size - 1, biome.x + biome.width)
+            self.map[:, y_start:y_end, x_start:x_end] = self.EMPTY
 
-        # 7. Safety Net: Enforce strict outer borders just in case
+        # 9. Safety Net: Enforce strict outer map borders
         self.map[:, 0, :] = self.WALL
         self.map[:, -1, :] = self.WALL
         self.map[:, :, 0] = self.WALL
         self.map[:, :, -1] = self.WALL
 
+    def _carve_corridor(self, idx_a: int, idx_b: int, centers_x: torch.Tensor, centers_y: torch.Tensor, xx_3d: torch.Tensor, yy_3d: torch.Tensor):
+        """
+        Helper method to punch L-shaped corridors between two specific room indices.
+        """
+        start_x = centers_x[:, idx_a].view(-1, 1, 1)
+        start_y = centers_y[:, idx_a].view(-1, 1, 1)
+        end_x = centers_x[:, idx_b].view(-1, 1, 1)
+        end_y = centers_y[:, idx_b].view(-1, 1, 1)
+
+        min_x = torch.minimum(start_x, end_x)
+        max_x = torch.maximum(start_x, end_x)
+        min_y = torch.minimum(start_y, end_y)
+        max_y = torch.maximum(start_y, end_y)
+
+        # Carve an L-shape matching the center points
+        h_corridor = (yy_3d == start_y) & (xx_3d >= min_x) & (xx_3d <= max_x)
+        v_corridor = (xx_3d == end_x) & (yy_3d >= min_y) & (yy_3d <= max_y)
+
+        self.map[h_corridor | v_corridor] = self.EMPTY
 
     def _generate_positions(self):
         """
@@ -441,47 +458,62 @@ class World:
         self.map[env_indices, spawn_rows, spawn_cols] = self.FOOD
     
     def _spawn_food(self):
-        # 1. Generate random rolls for every cell globally
-        rand_spawns = torch.rand((self.cfg.envs, self.cfg.grid_size, self.cfg.grid_size), device=self.cfg.device)
-
-        # 2. Identify all valid empty spaces globally
+        # 1. Identify all valid empty spaces globally
         empty_spaces = (self.map == self.EMPTY)
 
-        # 3. We will build the spawn mask biome by biome to enforce exact caps
+        # 2. Prepare the master mask for the whole grid
         spawn_mask = torch.zeros((self.cfg.envs, self.cfg.grid_size, self.cfg.grid_size), dtype=torch.bool, device=self.cfg.device)
 
         for biome in self.cfg.biomes:
             y_start, y_end = biome.y, biome.y + biome.height
             x_start, x_end = biome.x, biome.x + biome.width
 
-            # Extract the random rolls and empty spaces for just this biome
-            biome_rands = rand_spawns[:, y_start:y_end, x_start:x_end].clone()
+            # ==========================================
+            # THE FIX: THE REGROWTH WAVE
+            # We roll exactly ONE die per environment for the whole biome.
+            # ==========================================
+            wave_rolls = torch.rand(self.cfg.envs, device=self.cfg.device)
+            wave_triggers = wave_rolls < biome.food_refresh_rate # Shape: (envs,)
+
+            # If no environments triggered a wave for this biome, completely skip the math
+            if not wave_triggers.any():
+                continue 
+
+            # Extract the empty spaces for just this biome
             biome_empty = empty_spaces[:, y_start:y_end, x_start:x_end]
-
-            # Force non-empty spaces to 1.0 so they automatically fail the probability check
-            biome_rands[~biome_empty] = 1.0
-
-            # Flatten the spatial dimensions so we can rank the rolls
-            flat_rands = biome_rands.reshape(self.cfg.envs, -1)
 
             # Calculate exactly how much room is left in this biome before hitting the cap
             biome_area = self.map[:, y_start:y_end, x_start:x_end]
             current_food_counts = (biome_area == self.FOOD).sum(dim=(1, 2))
             allowed_spawns = torch.clamp(biome.max_food - current_food_counts, min=0)
 
+            # Generate random rolls ONLY to pick WHICH cells get the food
+            biome_rands = torch.rand((self.cfg.envs, biome.height, biome.width), device=self.cfg.device)
+            
+            # Force non-empty spaces to 1.0 so they automatically fail the selection
+            biome_rands[~biome_empty] = 1.0 
+
+            # Flatten the spatial dimensions so we can rank the rolls
+            flat_rands = biome_rands.reshape(self.cfg.envs, -1)
+
             # Rank the random rolls (0 is the lowest/most likely roll)
             sorted_indices = torch.argsort(flat_rands, dim=1)
             ranks = torch.argsort(sorted_indices, dim=1)
 
-            # A spawn is valid IF the random roll hit the refresh rate AND its rank is within the remaining capacity
-            valid_prob = flat_rands < biome.food_refresh_rate
+            # A spawn is valid IF its rank is within the remaining capacity
             within_cap = ranks < allowed_spawns.unsqueeze(1)
+            
+            # Broadcast our Wave Triggers to match the flat grid shape
+            is_wave_env = wave_triggers.unsqueeze(1) 
 
-            # Combine conditions and reshape back to the biome grid shape
-            flat_spawn = valid_prob & within_cap
+            # Combine conditions: It must be within cap AND the environment must have triggered a wave
+            # We also ensure flat_rands != 1.0 to prevent spawning on walls if max_food > empty tiles
+            flat_spawn = within_cap & is_wave_env & (flat_rands != 1.0)
+            
+            # Reshape and apply to the master mask
             spawn_mask[:, y_start:y_end, x_start:x_end] = flat_spawn.reshape(self.cfg.envs, biome.height, biome.width)
 
-        # 4. Apply the final, strictly capped food spawns to the map
+        # 3. Apply the final wave spawns to the map
         self.map[spawn_mask] = self.FOOD
 
     def reset(self, layout: str = "easy"):
@@ -681,7 +713,7 @@ class World:
 
         return self.get_observations(), rewards, dones
 
-    def render(self, env_idx=0, cell_size=24, fps=15, last_action=None):
+    def render(self, env_idx=0, cell_size=24, fps=15, last_action=None, layout = "easy"):
         """
         Renders a visually stunning, bioluminescent environment with Bug Vision
         and Telemetry properly stacked in a unified side panel.
@@ -924,6 +956,10 @@ class World:
         draw_ui_text(self.font_sm, "Food Eaten:", f"{eaten}", self.ui_text_primary, current_y)
         current_y += 30
         draw_ui_text(self.font_sm, "Last Action:", action_str, self.ui_accent, current_y)
+
+        # Reset everything once the bug under view dies
+        if not is_alive:
+            env.reset(layout=layout)
 
         pygame.display.flip()
         self.clock.tick(fps)
