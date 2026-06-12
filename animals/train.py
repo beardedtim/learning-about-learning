@@ -81,6 +81,8 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
     b_rewards = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
     b_values = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
     b_dones = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
+    b_int_rewards = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
+    b_values_int = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
     dones = torch.zeros(world_cfg.envs, device=world_cfg.device)
     logger.info(f"Starting Training: {num_updates} updates of {world_cfg.envs * ppo_cfg.rollout_steps} steps each.")
 
@@ -106,6 +108,7 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
             b_actions[step] = actions
             b_logprobs[step] = logprobs
             b_values[step] = value_ext.squeeze(-1)
+            b_values_int[step] = value_int.squeeze(-1)
 
             # Step the environment
             next_obs, rewards, next_dones = env.step(actions.unsqueeze(1))
@@ -120,12 +123,31 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
             prev_action = actions
             prev_reward = rewards
 
+            # 1. Wipe memory for dead bugs FIRST
+            if dones.any():
+                new_h[:, dones.bool(), :] = 0.0
+                new_c[:, dones.bool(), :] = 0.0
+                prev_action[dones] = 0
+                prev_reward[dones] = 0.0
+
+            # 2. NOW build the features for the next step
             obs = build_obs_features(raw_obs, prev_action, prev_reward, env.life_force.squeeze(1), max_life_force=world_cfg.max_life_force)
+
+            h, c = new_h, new_c
+
+            # CALCULATE INTRINSIC REWARD ON THE NEW STATE
+            with torch.no_grad():
+                target_feat = brain.rnd_target(obs)
+                pred_feat = brain.rnd_predictor(obs)
+                # The MSE between predictor and target is the novelty score
+                int_reward = torch.mean((pred_feat - target_feat)**2, dim=-1)
+            
+            b_int_rewards[step] = int_reward
 
             # Wipe memory for dead bugs
             if dones.any():
-                new_h[:, dones, :] = 0.0
-                new_c[:, dones, :] = 0.0
+                new_h[:, dones.bool(), :] = 0.0
+                new_c[:, dones.bool(), :] = 0.0
                 prev_action[dones] = 0
                 prev_reward[dones] = 0.0
 
@@ -135,47 +157,53 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
         # PHASE 2: CALCULATE ADVANTAGES (GAE)
         # ==========================================
         with torch.no_grad():
-            # Get the value of the final state to bootstrap the last reward
             _, next_value_ext, next_value_int, _ = brain(obs, (h, c))
             next_value = next_value_ext.squeeze(-1)
+            next_value_int = next_value_int.squeeze(-1) # GET LAST INT VALUE
 
-            advantages = torch.zeros_like(b_rewards, device=world_cfg.device)
-            lastgaelam = 0
+            advantages_ext = torch.zeros_like(b_rewards, device=world_cfg.device)
+            advantages_int = torch.zeros_like(b_rewards, device=world_cfg.device)
+            lastgaelam_ext = 0
+            lastgaelam_int = 0
 
-            # Calculate backwards through time
             for t in reversed(range(rollout_steps)):
                 if t == rollout_steps - 1:
                     nextnonterminal = 1.0 - dones.float()
-                    nextvalues = next_value
+                    nextvalues_ext = next_value
+                    nextvalues_int = next_value_int
                 else:
                     nextnonterminal = 1.0 - b_dones[t + 1].float()
-                    nextvalues = b_values[t + 1]
+                    nextvalues_ext = b_values[t + 1]
+                    nextvalues_int = b_values_int[t + 1]
 
-                # TD Error
-                delta = b_rewards[t] + gamma * nextvalues * nextnonterminal - b_values[t]
-                # Generalized Advantage
-                advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+                # Extrinsic GAE
+                delta_ext = b_rewards[t] + gamma * nextvalues_ext * nextnonterminal - b_values[t]
+                advantages_ext[t] = lastgaelam_ext = delta_ext + gamma * gae_lambda * nextnonterminal * lastgaelam_ext
 
-            returns = advantages + b_values
+                # Intrinsic GAE (often uses a higher gamma like 0.99 for longer curiosity horizons)
+                delta_int = b_int_rewards[t] + 0.99 * nextvalues_int * nextnonterminal - b_values_int[t]
+                advantages_int[t] = lastgaelam_int = delta_int + 0.99 * gae_lambda * nextnonterminal * lastgaelam_int
+
+            advantages = advantages_ext + (0.01 * advantages_int)
+            returns_ext = advantages_ext + b_values
+            returns_int = advantages_int + b_values_int
 
         # ==========================================
         # PHASE 3: OPTIMIZE NEURAL NETWORK
         # ==========================================
-        # Reshape buffers to (batch_size, seq_len, features) for the LSTM evaluate_actions
-        # batch_size = envs, seq_len = rollout_steps
-        env_obs = b_obs.transpose(0, 1)       # (envs, rollout_steps, obs_dim)
-        env_actions = b_actions.transpose(0, 1) # (envs, rollout_steps)
+        env_obs = b_obs.transpose(0, 1)       
+        env_actions = b_actions.transpose(0, 1) 
         env_dones = b_dones.transpose(0, 1)
 
         flat_advantages = advantages.transpose(0, 1).flatten()
-        flat_returns = returns.transpose(0, 1).flatten()
+        flat_returns_ext = returns_ext.transpose(0, 1).flatten()
+        flat_returns_int = returns_int.transpose(0, 1).flatten()
         flat_old_logprobs = b_logprobs.transpose(0, 1).flatten()
 
-        # Normalize advantages (standard RL trick for stable gradients)
         flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
 
         for epoch in range(ppo_epochs):
-            # 1. Pass the whole sequence through the brain at once using the starting hidden state!
+            # 1. Pass the whole sequence through the brain at once
             new_logprobs, new_values_ext, new_values_int, entropy = brain.evaluate_actions(
                 env_obs,
                 (initial_h, initial_c),
@@ -185,44 +213,58 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
 
             # Flatten outputs to match advantages/returns
             new_logprobs = new_logprobs.flatten()
-            new_values = new_values_ext.flatten()
+            new_values_ext = new_values_ext.flatten()
+            new_values_int = new_values_int.flatten()
 
             # 2. Calculate PPO Ratio
             logratio = new_logprobs - flat_old_logprobs
             ratio = logratio.exp()
 
-            # 3. Calculate Policy Loss (Clipped Surrogate Objective)
+            # 3. Calculate Policy Loss
             pg_loss1 = -flat_advantages * ratio
             pg_loss2 = -flat_advantages * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
             pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-            # 4. Calculate Value Loss
-            v_loss = 0.5 * ((new_values - flat_returns) ** 2).mean()
+            # 4. Calculate Dual Value Loss
+            v_loss_ext = 0.5 * ((new_values_ext - flat_returns_ext) ** 2).mean()
+            v_loss_int = 0.5 * ((new_values_int - flat_returns_int) ** 2).mean()
+            v_loss = v_loss_ext + v_loss_int
 
-            # 5. Total Loss
-            loss = pg_loss - ent_coef * entropy + v_loss * vf_coef
+            # 5. Train the Curiosity Predictor! (THIS WAS LIKELY MISSING)
+            rnd_loss = brain.compute_rnd_loss(env_obs)
 
-            # 6. Backpropagation
+            # 6. Total Loss (Make sure rnd_loss is added here!)
+            loss = pg_loss - ent_coef * entropy + v_loss * vf_coef + rnd_loss
+
+            # 7. Backpropagation
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(brain.parameters(), 0.5) # Prevents exploding gradients in LSTM
+            nn.utils.clip_grad_norm_(brain.parameters(), 0.5) 
             optimizer.step()
 
         # --- Telemetry ---
         if update % 10 == 0:
             avg_reward = b_rewards.sum(dim=0).mean().item()
+            avg_int_reward = b_int_rewards.sum(dim=0).mean().item() 
             avg_life = env.life_force.mean().item()
 
             # The human-readable message for the console
-            msg = f"Update {update:4d}/{num_updates} | Reward: {avg_reward:6.1f} | Life: {avg_life:5.1f} | V-Loss: {v_loss.item():.3f} | PG-Loss: {pg_loss.item():.3f}"
+            msg = (f"Update {update:4d}/{num_updates} | "
+                   f"Rwd: {avg_reward:5.1f} | IntRwd: {avg_int_reward:6.2f} | "
+                   f"Life: {avg_life:5.1f} | "
+                   f"V-Ext: {v_loss_ext.item():6.2f} | V-Int: {v_loss_int.item():6.2f} | "
+                   f"RND: {rnd_loss.item():6.3f} | PG: {pg_loss.item():.3f}")
 
             # The structured dictionary for the JSON file
             metrics = {
                 "update": update,
                 "step": update * world_cfg.envs * ppo_cfg.rollout_steps,
                 "avg_reward": round(avg_reward, 2),
+                "avg_int_reward": round(avg_int_reward, 4),
                 "avg_life": round(avg_life, 2),
-                "value_loss": round(v_loss.item(), 4),
+                "value_loss_ext": round(v_loss_ext.item(), 4),
+                "value_loss_int": round(v_loss_int.item(), 4),
+                "rnd_loss": round(rnd_loss.item(), 4),
                 "policy_loss": round(pg_loss.item(), 4),
                 "entropy": round(entropy.item(), 4),
                 "avg_life_force": round(avg_life, 2),
@@ -244,7 +286,7 @@ def crawl():
     # === CRAWL: prove "find food, don't circle" ===
     crawl_biome = BiomeConfig(
         x=2, y=2, width=11, height=11,    # covers most of a 15x15 grid -> food is everywhere
-        food_refresh_rate=0.3,             # high refresh -> food rarely runs out, low pressure
+        food_refresh_rate=0.3,             # high refresh -> food rarlat_advantages = advantages.transpose(0, 1).flatten()
         eating_bonus=20.0,
     )
 

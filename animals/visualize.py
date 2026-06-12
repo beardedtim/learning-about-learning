@@ -65,7 +65,7 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt"):
                 if event.type == pygame.QUIT:
                     running = False
 
-            action_logits, value, (new_h, new_c) = brain(obs, (h, c))
+            action_logits, value_ext, value_int, (new_h, new_c) = brain(obs, (h, c))
             dist = Categorical(logits=action_logits)
             actions = dist.probs.argmax(dim=-1) 
             
