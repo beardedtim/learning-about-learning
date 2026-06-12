@@ -387,8 +387,7 @@ class World:
 
     def _generate_positions(self):
         """
-        Spawns bugs anywhere on EMPTY ground, EXCLUDING biome boundaries
-        (so bugs don't start standing right on top of food zones).
+        Spawns bugs anywhere on EMPTY ground
         """
         # 1. Start with uniform probability everywhere
         # Shape: (grid_size, grid_size)
@@ -468,18 +467,8 @@ class World:
             y_start, y_end = biome.y, biome.y + biome.height
             x_start, x_end = biome.x, biome.x + biome.width
 
-            # ==========================================
-            # THE FIX: THE REGROWTH WAVE
-            # We roll exactly ONE die per environment for the whole biome.
-            # ==========================================
-            wave_rolls = torch.rand(self.cfg.envs, device=self.cfg.device)
-            wave_triggers = wave_rolls < biome.food_refresh_rate # Shape: (envs,)
-
-            # If no environments triggered a wave for this biome, completely skip the math
-            if not wave_triggers.any():
-                continue 
-
-            # Extract the empty spaces for just this biome
+            # Per-cell regrowth: each empty cell independently has `food_refresh_rate`
+            # chance to spawn food this tick, capped by remaining biome capacity.
             biome_empty = empty_spaces[:, y_start:y_end, x_start:x_end]
 
             # Calculate exactly how much room is left in this biome before hitting the cap
@@ -487,30 +476,25 @@ class World:
             current_food_counts = (biome_area == self.FOOD).sum(dim=(1, 2))
             allowed_spawns = torch.clamp(biome.max_food - current_food_counts, min=0)
 
-            # Generate random rolls ONLY to pick WHICH cells get the food
-            biome_rands = torch.rand((self.cfg.envs, biome.height, biome.width), device=self.cfg.device)
-            
-            # Force non-empty spaces to 1.0 so they automatically fail the selection
-            biome_rands[~biome_empty] = 1.0 
+            if (allowed_spawns == 0).all():
+                continue
 
-            # Flatten the spatial dimensions so we can rank the rolls
-            flat_rands = biome_rands.reshape(self.cfg.envs, -1)
+            # Independent per-cell rolls
+            cell_rolls = torch.rand((self.cfg.envs, biome.height, biome.width), device=self.cfg.device)
+            cell_triggers = (cell_rolls < biome.food_refresh_rate) & biome_empty
 
-            # Rank the random rolls (0 is the lowest/most likely roll)
-            sorted_indices = torch.argsort(flat_rands, dim=1)
-            ranks = torch.argsort(sorted_indices, dim=1)
+            # Flatten so we can enforce the per-env capacity cap
+            flat_triggers = cell_triggers.reshape(self.cfg.envs, -1)
+            flat_rands = cell_rolls.reshape(self.cfg.envs, -1)
 
-            # A spawn is valid IF its rank is within the remaining capacity
+            # Among triggered cells, rank by roll value and keep only the lowest
+            # `allowed_spawns` of them (so we never exceed max_food)
+            tie_break = torch.where(flat_triggers, flat_rands, torch.ones_like(flat_rands))
+            ranks = torch.argsort(torch.argsort(tie_break, dim=1), dim=1)
             within_cap = ranks < allowed_spawns.unsqueeze(1)
-            
-            # Broadcast our Wave Triggers to match the flat grid shape
-            is_wave_env = wave_triggers.unsqueeze(1) 
 
-            # Combine conditions: It must be within cap AND the environment must have triggered a wave
-            # We also ensure flat_rands != 1.0 to prevent spawning on walls if max_food > empty tiles
-            flat_spawn = within_cap & is_wave_env & (flat_rands != 1.0)
-            
-            # Reshape and apply to the master mask
+            flat_spawn = flat_triggers & within_cap
+
             spawn_mask[:, y_start:y_end, x_start:x_end] = flat_spawn.reshape(self.cfg.envs, biome.height, biome.width)
 
         # 3. Apply the final wave spawns to the map
@@ -665,10 +649,7 @@ class World:
             self.food_eaten.index_add_(0, envs_that_ate, ones)
         
         dones = (self.life_force <= 0)
-        # 2. Capture the state AFTER the step
-        new_life_force = self.life_force.clone()
-
-        # 3. THE DOPAMINE SYSTEM (Sparse Caloric Reward)
+        # THE DOPAMINE SYSTEM (Sparse Caloric Reward)
         # Apply a tiny "time tax" (-0.01) to every step. 
         # This prevents the bug from learning to stand perfectly still.
         rewards = torch.full_like(initial_life, -0.01, device=self.cfg.device)
@@ -707,7 +688,7 @@ class World:
             # Unflag them so they don't roll again in the next while loop iteration
             needs_respawn &= ~valid_spot
 
-        # 4. Now that everyone is guaranteed to be on the board, reset life force
+        # Now that everyone is guaranteed to be on the board, reset life force
         self.life_force[dones] = 100.0
 
         self._spawn_food()
@@ -976,10 +957,10 @@ class World:
             
             for i, p in enumerate(probs):
                 # Label
-                self.screen.blit(self.font_sm.render(actions[i], True, self.ui_text_primary), (panel_rect.left + 35, current_y))
+                self.screen.blit(self.font_sm.render(actions[i], True, self.ui_text_primary), (panel_rect.left + 40, current_y))
                 
                 # Progress Bar Background
-                bar_x = panel_rect.left + 120
+                bar_x = panel_rect.left + 180
                 bar_w = 150
                 bar_h = 14
                 pygame.draw.rect(self.screen, (40, 40, 45), (bar_x, current_y + 4, bar_w, bar_h), border_radius=3)
@@ -1040,8 +1021,8 @@ class World:
 def get_default_sensors():
     vision=SensorCone(
         fov_deg=120,
-        front_radius=7,
-        side_radius=3,
+        front_radius=3,
+        side_radius=5,
     )
 
     prey_sensors = SensorRequest(
