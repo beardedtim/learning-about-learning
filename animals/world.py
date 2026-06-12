@@ -668,13 +668,14 @@ class World:
         # 2. Capture the state AFTER the step
         new_life_force = self.life_force.clone()
 
-        # 3. TRUE HUNGER REWARD: The reward is literally just the metabolic delta
-        rewards = new_life_force - initial_life
+        # 3. THE DOPAMINE SYSTEM (Sparse Caloric Reward)
+        # Apply a tiny "time tax" (-0.01) to every step. 
+        # This prevents the bug from learning to stand perfectly still.
+        rewards = torch.full_like(initial_life, -0.01, device=self.cfg.device)
 
-        # 4. The Death Penalty (Optional, but recommended)
-        # If the bug hits 0 life force, you can still give it a massive shock 
-        # so the critic network sharply categorizes death as a catastrophic failure.
-        rewards[dones] = -50.0
+        # The exact frame a bug eats, hit it with a massive positive gradient spike
+        if ate_food_mask.any():
+            rewards[ate_food_mask] = bonuses
         
         dead_rows = self.positions[..., 0][dones]
         dead_cols = self.positions[..., 1][dones]
