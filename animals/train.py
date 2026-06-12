@@ -478,6 +478,6 @@ def run():
 
 if __name__ == '__main__':
     # You can switch between progression stages here
-    crawl()
-    # walk()
+    # crawl()
+    walk()
     # run()

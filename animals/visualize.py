@@ -56,9 +56,25 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt", la
                 if event.type == pygame.QUIT:
                     running = False
 
-            action_logits, value_ext, value_int, (new_h, new_c) = brain(obs, (h, c))
-            dist = Categorical(logits=action_logits)
-            actions = dist.sample() 
+            with torch.no_grad():                
+                action_logits, value_ext, value_int, (new_h, new_c) = brain(obs, (h, c))
+                dist = Categorical(logits=action_logits)
+                actions = dist.sample()
+                # Calculate RND novelty exactly as you do in Phase 1 of training
+                target_feat = brain.rnd_target(obs)
+                pred_feat = brain.rnd_predictor(obs)
+                novelty = torch.mean((pred_feat - target_feat)**2, dim=-1)
+
+            # Convert logits to actual 0-100% probabilities for the UI
+            action_probs = torch.softmax(action_logits, dim=-1)
+
+            # Package the brain state for Environment 0 (the one being rendered)
+            current_brain_state = {
+                'probs': action_probs[0].cpu().numpy().tolist(),
+                'v_ext': value_ext[0].item(),
+                'v_int': value_int[0].item(),
+                'novelty': novelty[0].item()
+            }
             
             next_obs, rewards, dones = env.step(actions.unsqueeze(1))
             
@@ -79,7 +95,7 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt", la
 
             action_taken = actions[0].item()
 
-            env.render(env_idx=0, fps=15, last_action=action_taken, layout=layout)
+            env.render(env_idx=0, fps=15, last_action=action_taken, layout=layout, brain_state=current_brain_state)
 
 
             h, c = new_h, new_c
@@ -88,67 +104,67 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt", la
 
 if __name__ == '__main__':
     # Crawl Config
-    crawl_biome_left = BiomeConfig(
-        x=2, y=2, width=6, height=20,
-        food_refresh_rate=0.1, 
-        eating_bonus=40.0, 
-        max_food=8
+    # crawl_biome_left = BiomeConfig(
+    #     x=2, y=2, width=6, height=20,
+    #     food_refresh_rate=0.1, 
+    #     eating_bonus=40.0, 
+    #     max_food=8
+    # )
+
+    # crawl_biome_right = BiomeConfig(
+    #     x=16, y=2, width=6, height=20,
+    #     food_refresh_rate=0.1, 
+    #     eating_bonus=40.0, 
+    #     max_food=8
+    # )
+
+    # world_cfg_crawl = WorldConfig(
+    #     grid_size=24,
+    #     envs=32,
+    #     biomes=[crawl_biome_right, crawl_biome_left],
+    #     bug_sensors=get_default_sensors(),
+    #     num_bugs=1,
+    #     min_food=8,
+    #     device='cpu',
+    # )
+
+    # print("Booting visualizer...")
+    # render_trained_brain(world_cfg_crawl, load_path="stage1_crawl.pt", layout="easy")
+
+    # Walk Config
+    biome_1 = BiomeConfig(
+        x=2, y=2, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
     )
 
-    crawl_biome_right = BiomeConfig(
-        x=16, y=2, width=6, height=20,
-        food_refresh_rate=0.1, 
-        eating_bonus=40.0, 
-        max_food=8
+    biome_2 = BiomeConfig(
+        x=22, y=2, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
     )
 
-    world_cfg_crawl = WorldConfig(
-        grid_size=24,
+    biome_3 = BiomeConfig(
+        x=12, y=22, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
+    )
+
+    world_cfg_walk = WorldConfig(
+        grid_size=32,
         envs=32,
-        biomes=[crawl_biome_right, crawl_biome_left],
+        biomes=[biome_1, biome_2, biome_3],
         bug_sensors=get_default_sensors(),
         num_bugs=1,
-        min_food=8,
+        min_food=1,
         device='cpu',
     )
 
     print("Booting visualizer...")
-    render_trained_brain(world_cfg_crawl, load_path="stage1_crawl.pt", layout="easy")
-
-    # Walk Config
-    # biome_1 = BiomeConfig(
-    #     x=2, y=2, width=8, height=8,
-    #     food_refresh_rate=0.05,
-    #     eating_bonus=30.0,
-    #     max_food=3
-    # )
-
-    # biome_2 = BiomeConfig(
-    #     x=22, y=2, width=8, height=8,
-    #     food_refresh_rate=0.05,
-    #     eating_bonus=30.0,
-    #     max_food=3
-    # )
-
-    # biome_3 = BiomeConfig(
-    #     x=12, y=22, width=8, height=8,
-    #     food_refresh_rate=0.05,
-    #     eating_bonus=30.0,
-    #     max_food=3
-    # )
-
-    # world_cfg_walk = WorldConfig(
-    #     grid_size=32,
-    #     envs=32,
-    #     min_food=1,
-    #     biomes=[biome_1, biome_2, biome_3],
-    #     bug_sensors=get_default_sensors(),
-    #     num_bugs=1,
-    #     device='cuda' if torch.cuda.is_available() else 'cpu',
-    # )
-
-    # print("Booting visualizer...")
-    # render_trained_brain(world_cfg_walk, load_path="stage2_walk_medium.pt", layout="medium")
+    render_trained_brain(world_cfg_walk, load_path="stage2_walk_medium.pt", layout="medium")
     
     # Hard
     # jackpot_biome = BiomeConfig(

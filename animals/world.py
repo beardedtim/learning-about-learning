@@ -713,7 +713,7 @@ class World:
 
         return self.get_observations(), rewards, dones
 
-    def render(self, env_idx=0, cell_size=24, fps=15, last_action=None, layout = "easy"):
+    def render(self, env_idx=0, cell_size=24, fps=15, last_action=None, layout = "easy", brain_state=None):
         """
         Renders a visually stunning, bioluminescent environment with Bug Vision
         and Telemetry properly stacked in a unified side panel.
@@ -724,11 +724,11 @@ class World:
         if not hasattr(self, 'screen'):
             pygame.init()
             self.cell_size = cell_size
-            self.panel_width = 320 
+            self.panel_width = 420 
             self.grid_pixel_size = self.cfg.grid_size * cell_size
             
             self.width = self.grid_pixel_size + self.panel_width
-            self.height = max(self.grid_pixel_size, 550) 
+            self.height = max(self.grid_pixel_size, 920) 
             
             self.screen = pygame.display.set_mode((self.width, self.height))
             pygame.display.set_caption(f"Biome World - Env {env_idx}")
@@ -847,15 +847,15 @@ class World:
         pygame.draw.rect(self.screen, self.ui_bg, panel_rect)
         pygame.draw.line(self.screen, self.ui_border, (panel_rect.left, 0), (panel_rect.left, self.height), 2)
 
-        current_y = 25
+        current_y = 30
 
         # ==================== A. FIRST-PERSON RADAR (TOP) ====================
-        self.screen.blit(self.font_title.render("BUG VISION", True, self.ui_text_primary), (panel_rect.left + 25, current_y))
+        self.screen.blit(self.font_title.render("BUG VISION", True, self.ui_text_primary), (panel_rect.left + 30, current_y))
         current_y += 45
         
         if is_alive:
             mini_cell = 18
-            mini_grid_size = 11 
+            mini_grid_size = 17 
             
             radar_x = panel_rect.left + (self.panel_width - (mini_grid_size * mini_cell)) // 2
             mini_map_rect = pygame.Rect(radar_x, current_y, mini_grid_size * mini_cell, mini_grid_size * mini_cell)
@@ -865,7 +865,7 @@ class World:
 
             radar_offsets = self.cone_offsets[0].cpu().numpy()
             actual_offsets = self.cone_offsets[heading].cpu().numpy()
-            bug_mini_center = 5 
+            bug_mini_center = 8 
 
             for i in range(len(actual_offsets)):
                 obs_row = bug_row + actual_offsets[i, 0]
@@ -956,6 +956,78 @@ class World:
         draw_ui_text(self.font_sm, "Food Eaten:", f"{eaten}", self.ui_text_primary, current_y)
         current_y += 30
         draw_ui_text(self.font_sm, "Last Action:", action_str, self.ui_accent, current_y)
+        current_y += 40
+
+        # ==================== C. BRAIN ACTIVITY (BOTTOM) ====================
+        pygame.draw.line(self.screen, self.ui_border, (panel_rect.left + 25, current_y), (panel_rect.right - 25, current_y), 1)
+        current_y += 20
+        
+        self.screen.blit(self.font_title.render("BRAIN ACTIVITY", True, self.ui_text_primary), (panel_rect.left + 25, current_y))
+        current_y += 40
+
+        if brain_state and is_alive:
+            # --- 1. Action Probabilities (The Actor) ---
+            self.screen.blit(self.font_sm.render("Motor Cortex (Action Probs):", True, self.ui_text_sec), (panel_rect.left + 25, current_y))
+            current_y += 25
+            
+            probs = brain_state.get('probs', [0.0, 0.0, 0.0])
+            actions = ["FORWARD", "RIGHT", "LEFT"]
+            
+            for i, p in enumerate(probs):
+                # Label
+                self.screen.blit(self.font_sm.render(actions[i], True, self.ui_text_primary), (panel_rect.left + 35, current_y))
+                
+                # Progress Bar Background
+                bar_x = panel_rect.left + 120
+                bar_w = 150
+                bar_h = 14
+                pygame.draw.rect(self.screen, (40, 40, 45), (bar_x, current_y + 4, bar_w, bar_h), border_radius=3)
+                
+                # Progress Bar Fill
+                fill_w = int(bar_w * p)
+                if fill_w > 0:
+                    pygame.draw.rect(self.screen, self.ui_accent, (bar_x, current_y + 4, fill_w, bar_h), border_radius=3)
+                
+                # Percentage Text
+                pct_text = f"{p*100:.1f}%"
+                self.screen.blit(self.font_sm.render(pct_text, True, self.ui_text_primary), (bar_x + bar_w + 10, current_y))
+                
+                current_y += 25
+
+            current_y += 10
+            
+            # --- 2. Expected Values (The Critic) ---
+            self.screen.blit(self.font_sm.render("Survival Instinct (Values):", True, self.ui_text_sec), (panel_rect.left + 25, current_y))
+            current_y += 25
+            
+            v_ext = brain_state.get('v_ext', 0.0)
+            v_int = brain_state.get('v_int', 0.0)
+            
+            draw_ui_text(self.font_sm, "Ext Value:", f"{v_ext:8.2f}", self.food_base_color, current_y)
+            current_y += 25
+            draw_ui_text(self.font_sm, "Int Value:", f"{v_int:8.2f}", self.bug_color, current_y)
+            current_y += 35
+
+            # --- 3. Curiosity (RND) ---
+            novelty = brain_state.get('novelty', 0.0)
+            self.screen.blit(self.font_sm.render("Curiosity (RND Novelty):", True, self.ui_text_sec), (panel_rect.left + 25, current_y))
+            current_y += 25
+            
+            # Draw a novelty meter (spikes when entering new areas)
+            meter_x = panel_rect.left + 25
+            meter_w = 270
+            meter_h = 8
+            pygame.draw.rect(self.screen, (40, 40, 45), (meter_x, current_y, meter_w, meter_h), border_radius=2)
+            
+            # Cap the visual fill at a novelty score of 2.0 so the bar doesn't break the UI
+            fill_w = min(meter_w, int(meter_w * (novelty / 2.0))) 
+            if fill_w > 0:
+                pygame.draw.rect(self.screen, self.bug_color, (meter_x, current_y, fill_w, meter_h), border_radius=2)
+                
+            self.screen.blit(self.font_sm.render(f"{novelty:.4f}", True, self.ui_text_primary), (meter_x + meter_w - 45, current_y - 20))
+
+        else:
+            self.screen.blit(self.font_sm.render("NO SIGNAL", True, (100, 100, 100)), (panel_rect.left + 25, current_y))
 
         # Reset everything once the bug under view dies
         if not is_alive:
