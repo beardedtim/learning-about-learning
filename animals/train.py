@@ -37,6 +37,126 @@ class PPOConfig:
     vf_coef: float = DEFAULT_VF_COEF
     lr: float = DEFAULT_LR
 
+#
+# Moved training configs to own functions so we could use them
+# inside of visualize
+#
+
+def crawl_ppo_training_config():
+    crawl_biome_left = BiomeConfig(
+        x=2, y=2, width=6, height=20,
+        food_refresh_rate=0.05, 
+        eating_bonus=35.0, 
+        max_food=3
+    )
+
+    crawl_biome_right = BiomeConfig(
+        x=16, y=2, width=6, height=20,
+        food_refresh_rate=0.05, 
+        eating_bonus=35.0, 
+        max_food=3
+    )
+
+    world_cfg_crawl = WorldConfig(
+        grid_size=24,
+        envs=32,
+        biomes=[crawl_biome_right, crawl_biome_left],
+        bug_sensors=get_default_sensors(),
+        num_bugs=1,
+        min_food=3,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+    )
+
+    ppo_cfg_crawl = PPOConfig(
+        rollout_steps=256,
+        ent_coef=0.02,
+        ppo_epochs=16,
+        lr=3e-4,
+    )
+
+    return world_cfg_crawl, ppo_cfg_crawl
+
+def walk_ppo_training_config():
+    biome_1 = BiomeConfig(
+        x=2, y=2, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
+    )
+
+    biome_2 = BiomeConfig(
+        x=22, y=2, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
+    )
+
+    biome_3 = BiomeConfig(
+        x=12, y=22, width=8, height=8,
+        food_refresh_rate=0.05,
+        eating_bonus=30.0,
+        max_food=3
+    )
+
+    world_cfg_walk = WorldConfig(
+        grid_size=32,
+        envs=32,
+        biomes=[biome_1, biome_2, biome_3],
+        bug_sensors=get_default_sensors(),
+        num_bugs=1,
+        min_food=1,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+    )
+
+    ppo_cfg_walk = PPOConfig(
+        rollout_steps=256,
+        ent_coef=0.02,
+        ppo_epochs=4,
+        lr=3e-4,
+    )
+
+    return world_cfg_walk, ppo_cfg_walk
+
+def run_ppo_trianing_config():
+    jackpot_biome = BiomeConfig(
+        x=2, y=2, width=10, height=10,
+        food_refresh_rate=0.01,
+        eating_bonus=60.0,
+        max_food=7
+    )
+
+    steady_biome = BiomeConfig(
+        x=26, y=2, width=12, height=12,
+        food_refresh_rate=0.4,
+        eating_bonus=8.0,
+        max_food=3
+    )
+
+    desert_biome = BiomeConfig(
+        x=10, y=26, width=20, height=10,
+        food_refresh_rate=0.001,
+        eating_bonus=75.0,
+        max_food=1
+    )
+
+    world_cfg_run = WorldConfig(
+        grid_size=40,
+        envs=32,
+        biomes=[jackpot_biome, steady_biome, desert_biome],
+        bug_sensors=get_default_sensors(),
+        min_food=5,
+        num_bugs=1,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+    )
+
+    ppo_cfg_run = PPOConfig(
+        rollout_steps=128,
+        ppo_epochs=4,
+        lr=3e-4,
+    )
+
+    return world_cfg_run, ppo_cfg_run
+
 def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_path="smart_bug.pt", load_path="smart_bug.pt", total_timesteps=1_000_000, layout="easy"):
     """
     Main training loop for the Proximal Policy Optimization (PPO) agent.
@@ -320,44 +440,15 @@ def crawl():
     """
     Stage 1: A simple biome dense with food to allow the agent to establish base navigation and eating mechanics.
     """
-    crawl_biome_left = BiomeConfig(
-        x=2, y=2, width=6, height=20,
-        food_refresh_rate=0.05, 
-        eating_bonus=35.0, 
-        max_food=3
-    )
-
-    crawl_biome_right = BiomeConfig(
-        x=16, y=2, width=6, height=20,
-        food_refresh_rate=0.05, 
-        eating_bonus=35.0, 
-        max_food=3
-    )
-
-    world_cfg_crawl = WorldConfig(
-        grid_size=24,
-        envs=32,
-        biomes=[crawl_biome_right, crawl_biome_left],
-        bug_sensors=get_default_sensors(),
-        num_bugs=1,
-        min_food=3,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-    )
-
-    ppo_cfg_crawl = PPOConfig(
-        rollout_steps=256,
-        ent_coef=0.02,
-        ppo_epochs=16,
-        lr=3e-4,
-    )
+    (world_cfg, ppo_cfg) = crawl_ppo_training_config()
 
     print(f"=== Booting BugBrain Matrix (Stage 1: Crawl) ===")
-    print(f"Device: {world_cfg_crawl.device.upper()}")
-    print(f"Parallel Worlds: {world_cfg_crawl.envs}")
+    print(f"Device: {world_cfg.device.upper()}")
+    print(f"Parallel Worlds: {world_cfg.envs}")
 
     train_ppo(
-        world_cfg=world_cfg_crawl,
-        ppo_cfg=ppo_cfg_crawl,
+        world_cfg=world_cfg,
+        ppo_cfg=ppo_cfg,
         save_path="stage1_crawl.pt",
         load_path="stage1_crawl.pt",
         total_timesteps=20_000_000,
@@ -369,51 +460,15 @@ def walk():
     """
     Stage 2: Introduces standard mazes and obstacles on top of the established eating behaviors.
     """
-    biome_1 = BiomeConfig(
-        x=2, y=2, width=8, height=8,
-        food_refresh_rate=0.05,
-        eating_bonus=30.0,
-        max_food=3
-    )
-
-    biome_2 = BiomeConfig(
-        x=22, y=2, width=8, height=8,
-        food_refresh_rate=0.05,
-        eating_bonus=30.0,
-        max_food=3
-    )
-
-    biome_3 = BiomeConfig(
-        x=12, y=22, width=8, height=8,
-        food_refresh_rate=0.05,
-        eating_bonus=30.0,
-        max_food=3
-    )
-
-    world_cfg_walk = WorldConfig(
-        grid_size=32,
-        envs=32,
-        biomes=[biome_1, biome_2, biome_3],
-        bug_sensors=get_default_sensors(),
-        num_bugs=1,
-        min_food=1,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-    )
-
-    ppo_cfg_walk = PPOConfig(
-        rollout_steps=256,
-        ent_coef=0.02,
-        ppo_epochs=4,
-        lr=3e-4,
-    )
+    (world_cfg, ppo_cfg) = walk_ppo_training_config()
 
     print(f"=== Booting BugBrain Matrix (Stage 2: Walk) ===")
-    print(f"Device: {world_cfg_walk.device.upper()}")
-    print(f"Parallel Worlds: {world_cfg_walk.envs}")
+    print(f"Device: {world_cfg.device.upper()}")
+    print(f"Parallel Worlds: {world_cfg.envs}")
 
     train_ppo(
-        world_cfg=world_cfg_walk,
-        ppo_cfg=ppo_cfg_walk,
+        world_cfg=world_cfg,
+        ppo_cfg=ppo_cfg,
         save_path="stage2_walk_medium.pt",
         load_path="stage1_crawl.pt", # If you want to load the previous crawl
         # load_path="stage2_walk_medium.pt", # If you want to load previous walk_medium runs
@@ -425,50 +480,15 @@ def run():
     """
     Stage 3: Complex layout utilizing distinct biome zones (Jackpot, Steady, Desert) with varied rulesets.
     """
-    jackpot_biome = BiomeConfig(
-        x=2, y=2, width=10, height=10,
-        food_refresh_rate=0.01,
-        eating_bonus=60.0,
-        max_food=7
-    )
-
-    steady_biome = BiomeConfig(
-        x=26, y=2, width=12, height=12,
-        food_refresh_rate=0.4,
-        eating_bonus=8.0,
-        max_food=3
-    )
-
-    desert_biome = BiomeConfig(
-        x=10, y=26, width=20, height=10,
-        food_refresh_rate=0.001,
-        eating_bonus=75.0,
-        max_food=1
-    )
-
-    world_cfg_run = WorldConfig(
-        grid_size=40,
-        envs=32,
-        biomes=[jackpot_biome, steady_biome, desert_biome],
-        bug_sensors=get_default_sensors(),
-        min_food=5,
-        num_bugs=1,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-    )
-
-    ppo_cfg_run = PPOConfig(
-        rollout_steps=128,
-        ppo_epochs=4,
-        lr=3e-4,
-    )
+    (world_cfg, ppo_cfg) = run_ppo_trianing_config()
 
     print(f"=== Booting BugBrain Matrix (Stage 3: Run) ===")
-    print(f"Device: {world_cfg_run.device.upper()}")
-    print(f"Parallel Worlds: {world_cfg_run.envs}")
+    print(f"Device: {world_cfg.device.upper()}")
+    print(f"Parallel Worlds: {world_cfg.envs}")
 
     train_ppo(
-        world_cfg=world_cfg_run,
-        ppo_cfg=ppo_cfg_run,
+        world_cfg=ppo_cfg,
+        ppo_cfg=ppo_cfg,
         save_path="stage3_run.pt",
         # load_path="stage3_run.pt",
         load_path="stage2_walk_hard.pt",
