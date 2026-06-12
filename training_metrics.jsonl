@@ -1,2 +1,0 @@
-{"timestamp": "2026-06-12T15:54:34.523983Z", "level": "INFO", "message": "No existing brain found at 'stage1_crawl.pt'. Initializing a fresh brain."}
-{"timestamp": "2026-06-12T15:54:34.524553Z", "level": "INFO", "message": "Starting Training: 2441 updates of 8192 steps each."}

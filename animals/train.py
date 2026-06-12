@@ -86,6 +86,11 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
     dones = torch.zeros(world_cfg.envs, device=world_cfg.device)
     logger.info(f"Starting Training: {num_updates} updates of {world_cfg.envs * ppo_cfg.rollout_steps} steps each.")
 
+
+    ep_returns = torch.zeros(world_cfg.envs, device=world_cfg.device)
+    ep_lengths = torch.zeros(world_cfg.envs, device=world_cfg.device)
+    completed_returns = []
+    completed_lengths = []
     for update in range(1, num_updates + 1):
         # Save the hidden state at the START of the rollout to replay during training
         initial_h, initial_c = h.clone(), c.clone()
@@ -119,6 +124,16 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
             rewards = rewards.squeeze(-1) if rewards.dim() > 1 else rewards
             dones = next_dones.squeeze(-1) if next_dones.dim() > 1 else next_dones
             b_rewards[step] = rewards
+            
+            ep_returns += rewards
+            ep_lengths += 1
+
+            for i in range(world_cfg.envs):
+                if dones[i]:
+                    completed_returns.append(ep_returns[i].item())
+                    completed_lengths.append(ep_lengths[i].item())
+                    ep_returns[i] = 0.0
+                    ep_lengths[i] = 0.0
 
             prev_action = actions
             prev_reward = rewards
@@ -244,35 +259,48 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
 
         # --- Telemetry ---
         if update % 10 == 0:
-            avg_reward = b_rewards.sum(dim=0).mean().item()
+            # 1. Calculate the true episodic averages from the dead bugs
+            safe_mean = lambda x: sum(x[-100:]) / len(x[-100:]) if x else 0.0
+            
+            true_ep_reward = safe_mean(completed_returns)
+            true_ep_length = safe_mean(completed_lengths)
+            
+            # 2. Calculate current snapshot stats
             avg_int_reward = b_int_rewards.sum(dim=0).mean().item() 
-            avg_life = env.life_force.mean().item()
+            current_life = env.life_force.mean().item()
 
-            # The human-readable message for the console
+            # 3. The console message you see in the terminal
             msg = (f"Update {update:4d}/{num_updates} | "
-                   f"Rwd: {avg_reward:5.1f} | IntRwd: {avg_int_reward:6.2f} | "
-                   f"Life: {avg_life:5.1f} | "
+                   f"EpRwd: {true_ep_reward:5.1f} | EpLen: {true_ep_length:5.1f} | "
+                   f"IntRwd: {avg_int_reward:6.2f} | "
                    f"V-Ext: {v_loss_ext.item():6.2f} | V-Int: {v_loss_int.item():6.2f} | "
                    f"RND: {rnd_loss.item():6.3f} | PG: {pg_loss.item():.3f}")
 
-            # The structured dictionary for the JSON file
+            # 4. The structured dictionary that gets saved to the JSON log file
             metrics = {
                 "update": update,
                 "step": update * world_cfg.envs * ppo_cfg.rollout_steps,
-                "avg_reward": round(avg_reward, 2),
+                
+                # THE TRUE EPISODE STATS (Replaces the old avg_reward and avg_life)
+                "ep_reward": round(true_ep_reward, 2),
+                "ep_length": round(true_ep_length, 2),
+                
+                # INTRINSIC STATS
                 "avg_int_reward": round(avg_int_reward, 4),
-                "avg_life": round(avg_life, 2),
+                
+                # NETWORK LOSSES
                 "value_loss_ext": round(v_loss_ext.item(), 4),
                 "value_loss_int": round(v_loss_int.item(), 4),
                 "rnd_loss": round(rnd_loss.item(), 4),
                 "policy_loss": round(pg_loss.item(), 4),
                 "entropy": round(entropy.item(), 4),
-                "avg_life_force": round(avg_life, 2),
-                "max_life_force": round(env.life_force.max().item(), 2),
-                "reward_mean": rewards.float().mean().item()
+                
+                # INSTANTANEOUS ENVIRONMENT STATE
+                "current_avg_life_force": round(current_life, 2),
+                "max_life_force": round(env.life_force.max().item(), 2)
             }
 
-            # Pass the dictionary using the 'extra' keyword
+            # Pass the dictionary to the logger
             logger.info(msg, extra={"metrics": metrics})
 
             # Save a checkpoint every 10 updates
