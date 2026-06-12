@@ -493,38 +493,60 @@ class World:
         Returns observations for all bugs. Shape: (envs, num_bugs, V)
 
         Cells hidden behind a wall (i.e. any cell along the line-of-sight
-        between the bug and the target cell is a WALL) are reported as WALL,
+        between the bug and the target cell is a WALL) are reported as BLOCKED,
         regardless of what's actually at the target cell.
         """
         bug_offsets = self.cone_offsets[self.headings]  # (envs, num_bugs, V, 2)
 
-        bug_rows = self.positions[..., 0].unsqueeze(2)
+        bug_rows = self.positions[..., 0].unsqueeze(2)  # (envs, num_bugs, 1)
         bug_cols = self.positions[..., 1].unsqueeze(2)
 
-        obs_rows = torch.clamp(bug_rows + bug_offsets[..., 0], 0, self.cfg.grid_size - 1)
-        obs_cols = torch.clamp(bug_cols + bug_offsets[..., 1], 0, self.cfg.grid_size - 1)
+        # 1. Get true coordinates (unclamped) to accurately detect Out-Of-Bounds
+        true_obs_rows = bug_rows + bug_offsets[..., 0]  # (envs, num_bugs, V)
+        true_obs_cols = bug_cols + bug_offsets[..., 1]
+
+        # Targets strictly outside the map are BLOCKED natively
+        oob_target = (true_obs_rows < 0) | (true_obs_rows >= self.cfg.grid_size) | \
+                     (true_obs_cols < 0) | (true_obs_cols >= self.cfg.grid_size)
+
+        # 2. Clamp for safe tensor gathering
+        obs_rows = torch.clamp(true_obs_rows, 0, self.cfg.grid_size - 1)
+        obs_cols = torch.clamp(true_obs_cols, 0, self.cfg.grid_size - 1)
 
         env_indices = torch.arange(self.cfg.envs, device=self.cfg.device).view(-1, 1, 1).expand(-1, self.cfg.num_bugs, self.obs_size)
 
         target_vals = self.map[env_indices, obs_rows, obs_cols]  # (envs, num_bugs, V)
 
         # --- Line-of-sight check ---
-        # ray_offsets_for_heading: (envs, num_bugs, V, max_len, 2)
         ray_offsets_for_heading = self.ray_offsets[self.headings]
 
-        ray_rows = torch.clamp(
-            bug_rows.unsqueeze(-1) + ray_offsets_for_heading[..., 0], 0, self.cfg.grid_size - 1
-        )  # (envs, num_bugs, V, max_len)
-        ray_cols = torch.clamp(
-            bug_cols.unsqueeze(-1) + ray_offsets_for_heading[..., 1], 0, self.cfg.grid_size - 1
-        )
+        # Use true unclamped coordinates for the ray steps as well
+        true_ray_rows = bug_rows.unsqueeze(-1) + ray_offsets_for_heading[..., 0] # (envs, num_bugs, V, max_len)
+        true_ray_cols = bug_cols.unsqueeze(-1) + ray_offsets_for_heading[..., 1]
+
+        ray_rows = torch.clamp(true_ray_rows, 0, self.cfg.grid_size - 1)
+        ray_cols = torch.clamp(true_ray_cols, 0, self.cfg.grid_size - 1)
 
         env_indices_ray = env_indices.unsqueeze(-1).expand_as(ray_rows)
         ray_vals = self.map[env_indices_ray, ray_rows, ray_cols]  # (envs, num_bugs, V, max_len)
 
-        # mask out padding ray steps (treat as non-wall so they never block)
-        is_wall_along_ray = (ray_vals == self.WALL) & self.ray_len_mask.view(1, 1, *self.ray_len_mask.shape)
-        blocked = is_wall_along_ray.any(dim=-1)  # (envs, num_bugs, V)
+        # 3. Mask out the target cell itself so it doesn't occlude itself
+        is_target_cell = (true_ray_rows == true_obs_rows.unsqueeze(-1)) & \
+                         (true_ray_cols == true_obs_cols.unsqueeze(-1))
+                         
+        # Identify out-of-bounds ray steps
+        oob_ray = (true_ray_rows < 0) | (true_ray_rows >= self.cfg.grid_size) | \
+                  (true_ray_cols < 0) | (true_ray_cols >= self.cfg.grid_size)
+
+        # An occluder is a WALL, an already BLOCKED cell, or an Out-Of-Bounds step
+        is_occluder = (ray_vals == self.WALL) | (ray_vals == self.BLOCKED) | oob_ray
+
+        # Check for occluders strictly *before* the target using the ray length mask
+        is_occluding_along_ray = is_occluder & ~is_target_cell & self.ray_len_mask.view(1, 1, *self.ray_len_mask.shape)
+        blocked_by_sight = is_occluding_along_ray.any(dim=-1)  # (envs, num_bugs, V)
+
+        # Final blocked state: Target is OOB natively, or line of sight is blocked
+        blocked = oob_target | blocked_by_sight
 
         return torch.where(blocked, torch.tensor(self.BLOCKED, device=self.cfg.device), target_vals)
     
@@ -691,7 +713,7 @@ class World:
             self.height = max(self.grid_pixel_size, 550) 
             
             self.screen = pygame.display.set_mode((self.width, self.height))
-            pygame.display.set_caption(f"Bioluminescent Bug World - Env {env_idx}")
+            pygame.display.set_caption(f"Biome World - Env {env_idx}")
             self.clock = pygame.time.Clock()
             
             # --- Fonts ---
@@ -840,20 +862,27 @@ class World:
                 # Line-of-sight check
                 ray_pts = self.ray_offsets[heading, i].cpu().numpy()
                 ray_len = int(self.ray_len_mask[i].sum().item())
+                
                 for j in range(ray_len):
                     ry = bug_row + ray_pts[j, 0]
                     rx = bug_col + ray_pts[j, 1]
+                    
+                    # 1. Out of bounds means the rest of the ray is blocked
                     if not (0 <= ry < self.cfg.grid_size and 0 <= rx < self.cfg.grid_size):
                         val = self.BLOCKED
                         break
-                    if grid[ry, rx] == self.WALL:
-                        val = self.WALL
-                        break
-                    if grid[ry, rx] == self.BLOCKED:
+                        
+                    # 2. If the ray reaches the target cell, it's visible! Stop checking.
+                    if ry == obs_row and rx == obs_col:
+                        break 
+                        
+                    # 3. If the ray hits a wall/block BEFORE reaching the target, the target is occluded.
+                    if grid[ry, rx] == self.WALL or grid[ry, rx] == self.BLOCKED:
                         val = self.BLOCKED
                         break
+
                 if val == self.WALL:   color = (100, 100, 100)
-                elif val == self.BLOCKED: color = (33, 33, 33)
+                elif val == self.BLOCKED: color = (0, 0, 0)
                 elif val == self.FOOD: color = self.ui_success
                 else:                  color = (30, 30, 35)
 
