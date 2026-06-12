@@ -6,7 +6,7 @@ from torch.distributions import Categorical
 from dataclasses import dataclass
 from collections import deque
 
-from world import BiomeConfig, World, WorldConfig, get_sensors
+from world import BiomeConfig, World, WorldConfig, get_default_sensors
 from brains import ActorCriticBrain, build_obs_features, NUM_CELL_TYPES, ACTION_DIM
 from log import setup_logger
 
@@ -323,14 +323,14 @@ def crawl():
     crawl_biome_left = BiomeConfig(
         x=2, y=2, width=6, height=20,
         food_refresh_rate=0.5, 
-        eating_bonus=100.0, 
+        eating_bonus=40.0, 
         max_food=8
     )
 
     crawl_biome_right = BiomeConfig(
         x=16, y=2, width=6, height=20,
         food_refresh_rate=0.5, 
-        eating_bonus=100.0, 
+        eating_bonus=40.0, 
         max_food=8
     )
 
@@ -338,7 +338,7 @@ def crawl():
         grid_size=24,
         envs=32,
         biomes=[crawl_biome_right, crawl_biome_left],
-        bug_sensors=get_sensors(),
+        bug_sensors=get_default_sensors(),
         num_bugs=1,
         min_food=8,
         device='cuda' if torch.cuda.is_available() else 'cpu',
@@ -394,7 +394,7 @@ def walk():
         grid_size=32,
         envs=32,
         biomes=[biome_1, biome_2, biome_3],
-        bug_sensors=get_sensors(),
+        bug_sensors=get_default_sensors(),
         num_bugs=1,
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
@@ -448,7 +448,7 @@ def run():
         grid_size=40,
         envs=32,
         biomes=[jackpot_biome, steady_biome, desert_biome],
-        bug_sensors=get_sensors(),
+        bug_sensors=get_default_sensors(),
         min_food=10,
         num_bugs=1,
         device='cuda' if torch.cuda.is_available() else 'cpu',

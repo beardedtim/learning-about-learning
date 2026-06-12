@@ -928,7 +928,7 @@ class World:
         pygame.display.flip()
         self.clock.tick(fps)
 
-def get_sensors():
+def get_default_sensors():
     vision=SensorCone(
         fov_deg=120,
         front_radius=7,
@@ -945,7 +945,7 @@ if __name__ == '__main__':
     import pygame
     # 1. Setup a small test configuration
     biome = BiomeConfig(x=4, y=4, width=8, height=8, food_refresh_rate=0.1, eating_bonus=30.0)
-    cfg = WorldConfig(grid_size=15, envs=1, biomes=[biome], num_bugs=1, device='cpu', bug_sensors=get_sensors()) # Use CPU for simple manual testing
+    cfg = WorldConfig(grid_size=15, envs=1, biomes=[biome], num_bugs=1, device='cpu', bug_sensors=get_default_sensors()) # Use CPU for simple manual testing
     
     env = World(cfg)
     obs = env.reset()

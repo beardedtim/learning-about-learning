@@ -2,7 +2,7 @@ import pygame
 import torch
 from torch.distributions import Categorical
 
-from world import World, WorldConfig, get_sensors, BiomeConfig
+from world import World, WorldConfig, get_default_sensors, BiomeConfig
 from brains import ACTION_DIM, NUM_CELL_TYPES, ActorCriticBrain, build_obs_features
 
 # ==========================================
@@ -76,6 +76,7 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt"):
                 new_c[:, dones, :] = 0.0
                 prev_action[dones] = 0
                 prev_reward[dones] = 0.0
+                env.reset()
 
             action_taken = actions[0].item()
 
@@ -117,7 +118,7 @@ if __name__ == '__main__':
         grid_size=24,
         envs=32,
         biomes=[crawl_biome_right, crawl_biome_left],
-        bug_sensors=get_sensors(),
+        bug_sensors=get_default_sensors(),
         num_bugs=1,
         min_food=8,
         device='cpu',
