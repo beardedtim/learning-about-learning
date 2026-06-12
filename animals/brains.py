@@ -66,6 +66,7 @@ def build_obs_features(
     prev_reward: torch.Tensor,  # (batch,) float
     life_force:  torch.Tensor,  # (batch,) float, range [0, max_life_force]
     max_life_force: float = 100.0,
+    reward_scale: float = 50.0,
     num_cell_types: int = NUM_CELL_TYPES,
     action_dim: int = ACTION_DIM,
     min_cell_code: int = -2,    # value of World.BLOCKED (the lowest cell code).
@@ -107,8 +108,10 @@ def build_obs_features(
         prev_action.long(), num_classes=action_dim
     ).float()                                           # (batch, action_dim)
 
-    life_norm = (life_force / max_life_force).unsqueeze(-1)   # (batch, 1)
-    reward_feat = prev_reward.float().unsqueeze(-1)            # (batch, 1)
+    life_norm = (life_force / max_life_force).unsqueeze(-1)
+    # Scale and clip the reward to roughly [-1.0, 1.0]
+    scaled_reward = torch.clamp(prev_reward.float() / reward_scale, -1.0, 1.0)
+    reward_feat = scaled_reward.unsqueeze(-1)                 # [-1.0, 1.0]
 
     return torch.cat([cell_onehot, prev_action_onehot, reward_feat, life_norm], dim=-1)
 

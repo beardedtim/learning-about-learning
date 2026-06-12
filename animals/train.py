@@ -322,16 +322,16 @@ def crawl():
     """
     crawl_biome_left = BiomeConfig(
         x=2, y=2, width=6, height=20,
-        food_refresh_rate=0.1, 
-        eating_bonus=40.0, 
-        max_food=8
+        food_refresh_rate=0.05, 
+        eating_bonus=35.0, 
+        max_food=3
     )
 
     crawl_biome_right = BiomeConfig(
         x=16, y=2, width=6, height=20,
-        food_refresh_rate=0.1, 
-        eating_bonus=40.0, 
-        max_food=8
+        food_refresh_rate=0.05, 
+        eating_bonus=35.0, 
+        max_food=3
     )
 
     world_cfg_crawl = WorldConfig(
@@ -340,14 +340,14 @@ def crawl():
         biomes=[crawl_biome_right, crawl_biome_left],
         bug_sensors=get_default_sensors(),
         num_bugs=1,
-        min_food=8,
+        min_food=3,
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
 
     ppo_cfg_crawl = PPOConfig(
         rollout_steps=256,
         ent_coef=0.02,
-        ppo_epochs=8,
+        ppo_epochs=16,
         lr=3e-4,
     )
 
@@ -478,6 +478,6 @@ def run():
 
 if __name__ == '__main__':
     # You can switch between progression stages here
-    # crawl()
-    walk()
+    crawl()
+    # walk()
     # run()
