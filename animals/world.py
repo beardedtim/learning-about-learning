@@ -581,7 +581,7 @@ class World:
         self.map[moving_envs, old_rows, old_cols] = self.EMPTY
         self.positions[valid_move_mask] = target_positions[valid_move_mask]
         self.map[moving_envs, new_rows, new_cols] = self.ANIMAL
-
+        bonuses = None
         if ate_food_mask.any():
             # Extract coordinates and apply life force bonuses
             food_rows = target_rows[ate_food_mask]
@@ -627,11 +627,17 @@ class World:
             self.map[envs_that_ate, new_rows, new_cols] = self.FOOD
         
         dones = (self.life_force <= 0)
-        
-        # Rewards calculate cleanly
-        rewards = torch.ones_like(self.life_force, dtype=torch.float32, device=self.cfg.device)
-        rewards[dones] = -1
+        # 2. Capture the state AFTER the step
+        new_life_force = self.life_force.clone()
 
+        # 3. TRUE HUNGER REWARD: The reward is literally just the metabolic delta
+        rewards = new_life_force - initial_life
+
+        # 4. The Death Penalty (Optional, but recommended)
+        # If the bug hits 0 life force, you can still give it a massive shock 
+        # so the critic network sharply categorizes death as a catastrophic failure.
+        rewards[dones] = -50.0
+        
         dead_rows = self.positions[..., 0][dones]
         dead_cols = self.positions[..., 1][dones]
         self.map[batch_env_indices[dones], dead_rows, dead_cols] = self.EMPTY

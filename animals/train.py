@@ -89,8 +89,12 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
 
     ep_returns = torch.zeros(world_cfg.envs, device=world_cfg.device)
     ep_lengths = torch.zeros(world_cfg.envs, device=world_cfg.device)
+    ep_food_eaten = torch.zeros(world_cfg.envs, device=world_cfg.device)
+
     completed_returns = []
     completed_lengths = []
+    completed_food = []
+
     for update in range(1, num_updates + 1):
         # Save the hidden state at the START of the rollout to replay during training
         initial_h, initial_c = h.clone(), c.clone()
@@ -127,13 +131,16 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
             
             ep_returns += rewards
             ep_lengths += 1
+            ep_food_eaten += (rewards > 0).float()
 
             for i in range(world_cfg.envs):
                 if dones[i]:
                     completed_returns.append(ep_returns[i].item())
                     completed_lengths.append(ep_lengths[i].item())
+                    completed_food.append(ep_food_eaten[i].item())
                     ep_returns[i] = 0.0
                     ep_lengths[i] = 0.0
+                    ep_food_eaten[i] = 0.0
 
             prev_action = actions
             prev_reward = rewards
@@ -264,6 +271,7 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
             
             true_ep_reward = safe_mean(completed_returns)
             true_ep_length = safe_mean(completed_lengths)
+            true_ep_food = safe_mean(completed_food)
             
             # 2. Calculate current snapshot stats
             avg_int_reward = b_int_rewards.sum(dim=0).mean().item() 
@@ -271,7 +279,7 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
 
             # 3. The console message you see in the terminal
             msg = (f"Update {update:4d}/{num_updates} | "
-                   f"EpRwd: {true_ep_reward:5.1f} | EpLen: {true_ep_length:5.1f} | "
+                   f"Food/Ep: {true_ep_food:4.1f} | EpLen: {true_ep_length:5.1f} | "
                    f"IntRwd: {avg_int_reward:6.2f} | "
                    f"V-Ext: {v_loss_ext.item():6.2f} | V-Int: {v_loss_int.item():6.2f} | "
                    f"RND: {rnd_loss.item():6.3f} | PG: {pg_loss.item():.3f}")

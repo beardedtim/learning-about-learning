@@ -45,17 +45,8 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt"):
     env.render(env_idx=0, fps=15, last_action=None)
     
     pygame.font.init()
-    try:
-        ui_font = pygame.font.SysFont("segoeui, roboto, arial", 16, bold=True)
-    except:
-        ui_font = pygame.font.Font(None, 24)
 
     running = True
-    action_map = {0: "FORWARD", 1: "RIGHT", 2: "LEFT"}
-
-    # Store PyGame's original display update functions
-    _original_flip = pygame.display.flip
-    _original_update = pygame.display.update
 
     print(f"=== Watching Trained Brain ({load_path}) ===")
 
@@ -67,7 +58,7 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt"):
 
             action_logits, value_ext, value_int, (new_h, new_c) = brain(obs, (h, c))
             dist = Categorical(logits=action_logits)
-            actions = dist.probs.argmax(dim=-1) 
+            actions = dist.sample() 
             
             next_obs, rewards, dones = env.step(actions.unsqueeze(1))
             
