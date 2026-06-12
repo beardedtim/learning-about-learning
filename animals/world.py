@@ -159,6 +159,7 @@ class BiomeConfig:
     height: int # how big the area is in height
     food_refresh_rate: float # how often per tick missing food can spawn here
     eating_bonus: float # how much each food gives in health
+    max_food: int = 20
 
 @dataclass
 class WorldConfig:
@@ -376,11 +377,6 @@ class World:
         # Shape: (grid_size, grid_size)
         prob_map = torch.ones((self.cfg.grid_size, self.cfg.grid_size), device=self.cfg.device)
  
-        # 2. Zero out probability in all biome 
-        for biome in self.cfg.biomes:
-            prob_map[biome.y : biome.y + biome.height, 
-                     biome.x : biome.x + biome.width] = 0.0
- 
         # 3. Mask out walls: never spawn on a wall
         is_wall = (self.map == self.WALL)
         prob_map[is_wall[0]] = 0.0
@@ -442,36 +438,39 @@ class World:
         env_indices = torch.arange(self.cfg.envs, device=self.cfg.device).view(-1, 1).expand(-1, self.cfg.min_food)
 
         # 7. Draw the food onto the map
-        self.map[env_indices, spawn_rows, spawn_cols] = self.FOOD        
+        self.map[env_indices, spawn_rows, spawn_cols] = self.FOOD
     
     def _spawn_food(self):
-        # 1. Generate a random float between 0.0 and 1.0 for every cell in every environment
-        # Shape: (envs, grid_size, grid_size)
+        # 1. Generate random rolls for every cell
         rand_spawns = torch.rand((self.cfg.envs, self.cfg.grid_size, self.cfg.grid_size), device=self.cfg.device)
 
-        # 2. Identify valid empty spaces where food CAN spawn (e.g., not a wall, not a bug, no existing food)
-        empty_spaces = (self.map == self.EMPTY) 
+        # 2. Identify all valid empty spaces
+        empty_spaces = (self.map == self.EMPTY)
 
-        # 3. Create a mask: cell is empty AND the random chance hit the refresh rate
-        # self.food_refresh_map automatically broadcasts from (grid, grid) to (envs, grid, grid)
+        # 3. Create the baseline spawn mask (chance hit & space is empty)
         spawn_mask = empty_spaces & (rand_spawns < self.food_refresh_map)
 
-        # 4. Apply the food to the map
-        self.map[spawn_mask] = self.FOOD
-    
-    def _spawn_food(self):
-        # 1. Generate a random float between 0.0 and 1.0 for every cell in every environment
-        # Shape: (envs, grid_size, grid_size)
-        rand_spawns = torch.rand((self.cfg.envs, self.cfg.grid_size, self.cfg.grid_size), device=self.cfg.device)
+        # 4. ENFORCE BIOME CAPS (The new logic!)
+        # We check each biome's boundaries to see if it is currently full
+        for biome in self.cfg.biomes:
+            y_start, y_end = biome.y, biome.y + biome.height
+            x_start, x_end = biome.x, biome.x + biome.width
 
-        # 2. Identify valid empty spaces where food CAN spawn (e.g., not a wall, not a bug, no existing food)
-        empty_spaces = (self.map == self.EMPTY) 
+            # Extract just the current biome's physical area from the map
+            biome_area = self.map[:, y_start:y_end, x_start:x_end]
 
-        # 3. Create a mask: cell is empty AND the random chance hit the refresh rate
-        # self.food_refresh_map automatically broadcasts from (grid, grid) to (envs, grid, grid)
-        spawn_mask = empty_spaces & (rand_spawns < self.food_refresh_map)
+            # Count how much food currently exists in this specific biome for ALL environments
+            # dim=(1, 2) collapses the rows/cols, leaving us with a 1D tensor of shape (envs,)
+            current_food_counts = (biome_area == self.FOOD).sum(dim=(1, 2)) 
 
-        # 4. Apply the food to the map
+            # Identify which specific parallel environments have hit the max capacity for THIS biome
+            capped_envs = (current_food_counts >= biome.max_food) 
+
+            # For any environment that is capped, strictly forbid new spawns in this biome's area
+            if capped_envs.any():
+                spawn_mask[capped_envs, y_start:y_end, x_start:x_end] = False
+
+        # 5. Apply the final, capped food spawns to the map
         self.map[spawn_mask] = self.FOOD
 
     def reset(self, layout: str = "easy"):
@@ -547,7 +546,7 @@ class World:
 
         # Final blocked state: Target is OOB natively, or line of sight is blocked
         blocked = oob_target | blocked_by_sight
-
+        
         return torch.where(blocked, torch.tensor(self.BLOCKED, device=self.cfg.device), target_vals)
     
     def step(self, actions: torch.Tensor):
@@ -621,32 +620,6 @@ class World:
             
             ones = torch.ones_like(envs_that_ate, dtype=self.food_eaten.dtype)
             self.food_eaten.index_add_(0, envs_that_ate, ones)
-
-            #  Build a probability map for these specific environments
-            # Expand the 2D biome map to match the number of foods we need to spawn
-            base_probs = self.food_refresh_map.expand(len(envs_that_ate), -1, -1).clone()
-            
-            #  Mask out invalid spaces
-            # We only want to spawn on EMPTY tiles. 
-            empty_in_envs = (self.map[envs_that_ate] == self.EMPTY)
-            base_probs[~empty_in_envs] = 0.0 # Force non-empty spaces to 0% chance
-            
-            #  Flatten the 2D grid to a 1D array so multinomial can process it
-            flat_probs = base_probs.view(len(envs_that_ate), -1)
-            
-            # Safety fallback: If a biome is completely full and has 0 empty spaces, 
-            # give a tiny uniform chance to all empty spaces on the map to prevent a crash
-            flat_probs += (empty_in_envs.view(len(envs_that_ate), -1) * 1e-6)
-
-            #  Spin the weighted roulette wheel! Grab 1 random index per eaten food
-            new_flat_indices = torch.multinomial(flat_probs, num_samples=1).squeeze(-1)
-            
-            #  Convert the 1D index back to 2D (row, col) coordinates
-            new_rows = new_flat_indices // self.cfg.grid_size
-            new_cols = new_flat_indices % self.cfg.grid_size
-            
-            #  Plop the new food onto the map
-            self.map[envs_that_ate, new_rows, new_cols] = self.FOOD
         
         dones = (self.life_force <= 0)
         # 2. Capture the state AFTER the step
@@ -692,6 +665,8 @@ class World:
 
         # 4. Now that everyone is guaranteed to be on the board, reset life force
         self.life_force[dones] = 100.0
+
+        self._spawn_food()
 
         return self.get_observations(), rewards, dones
 

@@ -4,6 +4,7 @@ import torch.optim as optim
 import torch.nn as nn
 from torch.distributions import Categorical
 from dataclasses import dataclass
+from collections import deque
 
 from world import BiomeConfig, World, WorldConfig, get_sensors
 from brains import ActorCriticBrain, build_obs_features, NUM_CELL_TYPES, ACTION_DIM
@@ -25,6 +26,7 @@ DEFAULT_LR = 3e-4
 class PPOConfig:
     """
     Configuration for the Proximal Policy Optimization training loop.
+    Contains hyperparameters for the reinforcement learning algorithm.
     """
     rollout_steps: int = DEFAULT_ROLLOUT_STEPS
     ppo_epochs: int = DEFAULT_PPO_EPOCHS
@@ -36,8 +38,12 @@ class PPOConfig:
     lr: float = DEFAULT_LR
 
 def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_path="smart_bug.pt", load_path="smart_bug.pt", total_timesteps=1_000_000, layout="easy"):
+    """
+    Main training loop for the Proximal Policy Optimization (PPO) agent.
+    Handles environment interaction, advantage estimation, and network optimization.
+    """
     logger = setup_logger()
-    # --- PPO Hyperparameters ---
+    
     rollout_steps = ppo_cfg.rollout_steps
     ppo_epochs = ppo_cfg.ppo_epochs
     gamma = ppo_cfg.gamma
@@ -49,32 +55,35 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
 
     num_updates = total_timesteps // (world_cfg.envs * rollout_steps)
 
-    # 1. Initialize Environment & Brain
+    # Initialize the World environment
     env = World(world_cfg)
 
+    # Extract initial observation shapes and prepare the starting state
     raw_obs = env.reset(layout=layout).squeeze(1)
     prev_action = torch.zeros(world_cfg.envs, dtype=torch.long, device=world_cfg.device)
     prev_reward = torch.zeros(world_cfg.envs, device=world_cfg.device)
+    
     obs = build_obs_features(raw_obs, prev_action, prev_reward, env.life_force.squeeze(1), max_life_force=world_cfg.max_life_force)
+    
     V = env.obs_size
     obs_dim = NUM_CELL_TYPES * V + ACTION_DIM + 2
 
+    # Initialize the neural network
     brain = ActorCriticBrain(obs_dim=obs_dim, action_dim=3).to(world_cfg.device)
 
-    # --- Checkpoint Loading ---
+    # Load existing network weights if available to resume training
     if os.path.exists(load_path):
         logger.info(f"Found existing brain at '{load_path}'. Loading weights to resume training...")
-        # map_location ensures it loads correctly even if you switch between CPU and CUDA
         brain.load_state_dict(torch.load(load_path, map_location=world_cfg.device))
     else:
         logger.info(f"No existing brain found at '{load_path}'. Initializing a fresh brain.")
-    # -------------------------------
 
     optimizer = optim.Adam(brain.parameters(), lr=lr, eps=1e-5)
-    # Initial hidden state
+    
+    # Initialize the recurrent hidden states
     h, c = brain.init_hidden(batch_size=world_cfg.envs, device=world_cfg.device)
 
-    # 2. Pre-allocate Rollout Buffers on the GPU (Zero memory transfers!)
+    # Pre-allocate rollout buffers on the target device to prevent memory transfers during execution
     b_obs = torch.zeros((rollout_steps, world_cfg.envs, obs_dim), device=world_cfg.device)
     b_actions = torch.zeros((rollout_steps, world_cfg.envs), dtype=torch.long, device=world_cfg.device)
     b_logprobs = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
@@ -84,19 +93,21 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
     b_int_rewards = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
     b_values_int = torch.zeros((rollout_steps, world_cfg.envs), device=world_cfg.device)
     dones = torch.zeros(world_cfg.envs, device=world_cfg.device)
+    
     logger.info(f"Starting Training: {num_updates} updates of {world_cfg.envs * ppo_cfg.rollout_steps} steps each.")
 
-
+    # Tracking vectors for episode statistics
     ep_returns = torch.zeros(world_cfg.envs, device=world_cfg.device)
     ep_lengths = torch.zeros(world_cfg.envs, device=world_cfg.device)
     ep_food_eaten = torch.zeros(world_cfg.envs, device=world_cfg.device)
 
-    completed_returns = []
-    completed_lengths = []
-    completed_food = []
+    # Use maxlen deques to prevent unbounded list growth and CPU RAM leaks
+    completed_returns = deque(maxlen=100)
+    completed_lengths = deque(maxlen=100)
+    completed_food = deque(maxlen=100)
 
     for update in range(1, num_updates + 1):
-        # Save the hidden state at the START of the rollout to replay during training
+        # Cache recurrent state at the start of the rollout to replay during optimization
         initial_h, initial_c = h.clone(), c.clone()
 
         # ==========================================
@@ -106,33 +117,34 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
             b_obs[step] = obs
             b_dones[step] = dones
 
-            # Get action from brain
+            # Query the neural network for action distribution and values
             with torch.no_grad():
                 action_logits, value_ext, value_int, (new_h, new_c) = brain(obs, (h, c))
                 dist = Categorical(logits=action_logits)
                 actions = dist.sample()
                 logprobs = dist.log_prob(actions)
 
-            # Store actions and values (using the extrinsic critic for now)
+            # Store decisions and estimations into buffers
             b_actions[step] = actions
             b_logprobs[step] = logprobs
             b_values[step] = value_ext.squeeze(-1)
             b_values_int[step] = value_int.squeeze(-1)
 
-            # Step the environment
+            # Step the environment simulation forward using the chosen actions
             next_obs, rewards, next_dones = env.step(actions.unsqueeze(1))
 
-            # Format outputs
+            # Normalize output shapes
             raw_obs = next_obs.squeeze(1)
-            rewards = rewards.squeeze(1)
-            rewards = rewards.squeeze(-1) if rewards.dim() > 1 else rewards
+            rewards = rewards.squeeze(-1) if rewards.dim() > 2 else rewards.squeeze()
             dones = next_dones.squeeze(-1) if next_dones.dim() > 1 else next_dones
             b_rewards[step] = rewards
             
+            # Accumulate ongoing episode metrics
             ep_returns += rewards
             ep_lengths += 1
             ep_food_eaten += (rewards > 0).float()
 
+            # Record stats and reset counters for environments that finished an episode
             for i in range(world_cfg.envs):
                 if dones[i]:
                     completed_returns.append(ep_returns[i].item())
@@ -142,52 +154,47 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
                     ep_lengths[i] = 0.0
                     ep_food_eaten[i] = 0.0
 
-            prev_action = actions
-            prev_reward = rewards
+            # Detach and track previous action/reward states 
+            prev_action = actions.clone()
+            prev_reward = rewards.clone()
 
-            # 1. Wipe memory for dead bugs FIRST
-            if dones.any():
-                new_h[:, dones.bool(), :] = 0.0
-                new_c[:, dones.bool(), :] = 0.0
-                prev_action[dones] = 0
-                prev_reward[dones] = 0.0
+            # Wipe RNN memory and inputs for environments that terminated to prevent state bleed
+            done_mask = dones.bool()
+            if done_mask.any():
+                new_h[:, done_mask, :] = 0.0
+                new_c[:, done_mask, :] = 0.0
+                prev_action[done_mask] = 0
+                prev_reward[done_mask] = 0.0
 
-            # 2. NOW build the features for the next step
+            # Construct the next step's observation tensor
             obs = build_obs_features(raw_obs, prev_action, prev_reward, env.life_force.squeeze(1), max_life_force=world_cfg.max_life_force)
 
+            # Assign the new hidden state
             h, c = new_h, new_c
 
-            # CALCULATE INTRINSIC REWARD ON THE NEW STATE
+            # Compute Random Network Distillation (RND) intrinsic reward for exploration
             with torch.no_grad():
                 target_feat = brain.rnd_target(obs)
                 pred_feat = brain.rnd_predictor(obs)
-                # The MSE between predictor and target is the novelty score
                 int_reward = torch.mean((pred_feat - target_feat)**2, dim=-1)
             
             b_int_rewards[step] = int_reward
-
-            # Wipe memory for dead bugs
-            if dones.any():
-                new_h[:, dones.bool(), :] = 0.0
-                new_c[:, dones.bool(), :] = 0.0
-                prev_action[dones] = 0
-                prev_reward[dones] = 0.0
-
-            h, c = new_h, new_c
 
         # ==========================================
         # PHASE 2: CALCULATE ADVANTAGES (GAE)
         # ==========================================
         with torch.no_grad():
+            # Get the final value estimate for the sequence boundary
             _, next_value_ext, next_value_int, _ = brain(obs, (h, c))
             next_value = next_value_ext.squeeze(-1)
-            next_value_int = next_value_int.squeeze(-1) # GET LAST INT VALUE
+            next_value_int = next_value_int.squeeze(-1)
 
             advantages_ext = torch.zeros_like(b_rewards, device=world_cfg.device)
             advantages_int = torch.zeros_like(b_rewards, device=world_cfg.device)
             lastgaelam_ext = 0
             lastgaelam_int = 0
 
+            # Calculate Generalized Advantage Estimation (GAE) in reverse order
             for t in reversed(range(rollout_steps)):
                 if t == rollout_steps - 1:
                     nextnonterminal = 1.0 - dones.float()
@@ -198,14 +205,15 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
                     nextvalues_ext = b_values[t + 1]
                     nextvalues_int = b_values_int[t + 1]
 
-                # Extrinsic GAE
+                # Extrinsic advantages
                 delta_ext = b_rewards[t] + gamma * nextvalues_ext * nextnonterminal - b_values[t]
                 advantages_ext[t] = lastgaelam_ext = delta_ext + gamma * gae_lambda * nextnonterminal * lastgaelam_ext
 
-                # Intrinsic GAE (often uses a higher gamma like 0.99 for longer curiosity horizons)
+                # Intrinsic advantages (Using a static 0.99 gamma for longer exploration horizons)
                 delta_int = b_int_rewards[t] + 0.99 * nextvalues_int * nextnonterminal - b_values_int[t]
                 advantages_int[t] = lastgaelam_int = delta_int + 0.99 * gae_lambda * nextnonterminal * lastgaelam_int
 
+            # Combine advantages and calculate final returns
             advantages = advantages_ext + (0.01 * advantages_int)
             returns_ext = advantages_ext + b_values
             returns_int = advantages_int + b_values_int
@@ -213,6 +221,8 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
         # ==========================================
         # PHASE 3: OPTIMIZE NEURAL NETWORK
         # ==========================================
+        
+        # Prepare buffers for batch evaluation
         env_obs = b_obs.transpose(0, 1)       
         env_actions = b_actions.transpose(0, 1) 
         env_dones = b_dones.transpose(0, 1)
@@ -222,10 +232,11 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
         flat_returns_int = returns_int.transpose(0, 1).flatten()
         flat_old_logprobs = b_logprobs.transpose(0, 1).flatten()
 
+        # Normalize advantages over the batch
         flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
 
         for epoch in range(ppo_epochs):
-            # 1. Pass the whole sequence through the brain at once
+            # Pass the entire rollout sequence through the network to update policy
             new_logprobs, new_values_ext, new_values_int, entropy = brain.evaluate_actions(
                 env_obs,
                 (initial_h, initial_c),
@@ -233,97 +244,87 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
                 env_dones
             )
 
-            # Flatten outputs to match advantages/returns
             new_logprobs = new_logprobs.flatten()
             new_values_ext = new_values_ext.flatten()
             new_values_int = new_values_int.flatten()
 
-            # 2. Calculate PPO Ratio
+            # Calculate the surrogate policy objective ratio
             logratio = new_logprobs - flat_old_logprobs
             ratio = logratio.exp()
 
-            # 3. Calculate Policy Loss
+            # Calculate clipped Policy Loss
             pg_loss1 = -flat_advantages * ratio
             pg_loss2 = -flat_advantages * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
             pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-            # 4. Calculate Dual Value Loss
+            # Calculate combined Value Loss for both intrinsic and extrinsic critics
             v_loss_ext = 0.5 * ((new_values_ext - flat_returns_ext) ** 2).mean()
             v_loss_int = 0.5 * ((new_values_int - flat_returns_int) ** 2).mean()
             v_loss = v_loss_ext + v_loss_int
 
-            # 5. Train the Curiosity Predictor! (THIS WAS LIKELY MISSING)
+            # Calculate exploration predictor error for intrinsic motivation
             rnd_loss = brain.compute_rnd_loss(env_obs)
 
-            # 6. Total Loss (Make sure rnd_loss is added here!)
+            # Combine all loss components into the final optimization objective
             loss = pg_loss - ent_coef * entropy + v_loss * vf_coef + rnd_loss
 
-            # 7. Backpropagation
+            # Run backpropagation and parameter update
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(brain.parameters(), 0.5) 
             optimizer.step()
 
-        # --- Telemetry ---
+        # ==========================================
+        # PHASE 4: LOGGING & CHECKPOINTS
+        # ==========================================
         if update % 10 == 0:
-            # 1. Calculate the true episodic averages from the dead bugs
-            safe_mean = lambda x: sum(x[-100:]) / len(x[-100:]) if x else 0.0
+            safe_mean = lambda x: sum(x) / len(x) if x else 0.0
             
             true_ep_reward = safe_mean(completed_returns)
             true_ep_length = safe_mean(completed_lengths)
             true_ep_food = safe_mean(completed_food)
             
-            # 2. Calculate current snapshot stats
             avg_int_reward = b_int_rewards.sum(dim=0).mean().item() 
             current_life = env.life_force.mean().item()
 
-            # 3. The console message you see in the terminal
             msg = (f"Update {update:4d}/{num_updates} | "
                    f"Food/Ep: {true_ep_food:4.1f} | EpLen: {true_ep_length:5.1f} | "
                    f"IntRwd: {avg_int_reward:6.2f} | "
                    f"V-Ext: {v_loss_ext.item():6.2f} | V-Int: {v_loss_int.item():6.2f} | "
                    f"RND: {rnd_loss.item():6.3f} | PG: {pg_loss.item():.3f}")
 
-            # 4. The structured dictionary that gets saved to the JSON log file
             metrics = {
                 "update": update,
                 "step": update * world_cfg.envs * ppo_cfg.rollout_steps,
-                
-                # THE TRUE EPISODE STATS (Replaces the old avg_reward and avg_life)
                 "ep_reward": round(true_ep_reward, 2),
                 "ep_length": round(true_ep_length, 2),
-                
-                # INTRINSIC STATS
                 "avg_int_reward": round(avg_int_reward, 4),
-                
-                # NETWORK LOSSES
                 "value_loss_ext": round(v_loss_ext.item(), 4),
                 "value_loss_int": round(v_loss_int.item(), 4),
                 "rnd_loss": round(rnd_loss.item(), 4),
                 "policy_loss": round(pg_loss.item(), 4),
                 "entropy": round(entropy.item(), 4),
-                
-                # INSTANTANEOUS ENVIRONMENT STATE
                 "current_avg_life_force": round(current_life, 2),
                 "max_life_force": round(env.life_force.max().item(), 2)
             }
 
-            # Pass the dictionary to the logger
             logger.info(msg, extra={"metrics": metrics})
-
-            # Save a checkpoint every 10 updates
             torch.save(brain.state_dict(), save_path)
 
+    # Final save operation at the end of training
     torch.save(brain.state_dict(), save_path)
     logger.info(f"Training complete. Brain saved to {save_path}")
 
 
 def crawl():
-    # === CRAWL: prove "find food, don't circle" ===
+    """
+    Stage 1: A simple biome dense with food to allow the agent to establish base navigation and eating mechanics.
+    """
     crawl_biome = BiomeConfig(
-        x=2, y=2, width=11, height=11,    # covers most of a 15x15 grid -> food is everywhere
-        food_refresh_rate=0.3,             # high refresh -> food rarlat_advantages = advantages.transpose(0, 1).flatten()
-        eating_bonus=20.0,
+        x=2, y=2, width=11, height=11,
+        food_refresh_rate=0.05,  # 5% chance per empty tile per tick
+        eating_bonus=100.0, 
+        max_food=15
     )
 
     world_cfg_crawl = WorldConfig(
@@ -333,7 +334,7 @@ def crawl():
         bug_sensors=get_sensors(),
         num_bugs=1,
         min_food=15,
-        device='cuda',
+        device='cuda' if torch.cuda.is_available() else 'cpu',
     )
 
     ppo_cfg_crawl = PPOConfig(
@@ -343,7 +344,7 @@ def crawl():
         lr=3e-4,
     )
 
-    print(f"=== Booting BugBrain Matrix ===")
+    print(f"=== Booting BugBrain Matrix (Stage 1: Crawl) ===")
     print(f"Device: {world_cfg_crawl.device.upper()}")
     print(f"Parallel Worlds: {world_cfg_crawl.envs}")
 
@@ -358,9 +359,11 @@ def crawl():
 
 
 def walk():
-    # === WALK: same biome, but now behind a maze ===
+    """
+    Stage 2: Introduces standard mazes and obstacles on top of the established eating behaviors.
+    """
     walk_biome = BiomeConfig(
-        x=2, y=2, width=11, height=11,    # same reward structure as crawl on purpose
+        x=2, y=2, width=11, height=11, 
         food_refresh_rate=0.3,
         eating_bonus=20.0,
     )
@@ -381,7 +384,7 @@ def walk():
         lr=3e-4,
     )
 
-    print(f"=== Booting BugBrain Matrix ===")
+    print(f"=== Booting BugBrain Matrix (Stage 2: Walk) ===")
     print(f"Device: {world_cfg_walk.device.upper()}")
     print(f"Parallel Worlds: {world_cfg_walk.envs}")
 
@@ -389,39 +392,27 @@ def walk():
         world_cfg=world_cfg_walk,
         ppo_cfg=ppo_cfg_walk,
         save_path="stage2_walk_medium.pt",
-        load_path="stage2_walk_medium.pt",
-        # load_path="stage1_crawl.pt",
+        load_path="stage1_crawl.pt",
         total_timesteps=20_000_000,
         layout="medium"
     )
 
-    # train_ppo(
-    #     world_cfg=world_cfg_walk,
-    #     ppo_cfg=ppo_cfg_walk,
-    #     save_path="stage2_walk_hard.pt",   # new save_path, loads stage2_walk_medium.pt weights manually if needed
-    #     load_path="staeg2_wakk_medium.pt",
-    #     total_timesteps=300_000,
-    #     layout="hard"
-    # )
-
 def run():
-    # === RUN: multiple biomes with distinct reward profiles, hard maze ===
-
-    # "Jackpot" zone: rare food, big payoff
+    """
+    Stage 3: Complex layout utilizing distinct biome zones (Jackpot, Steady, Desert) with varied rulesets.
+    """
     jackpot_biome = BiomeConfig(
         x=2, y=2, width=6, height=6,
-        food_refresh_rate=0.02,   # food spawns rarely here
-        eating_bonus=60.0,        # but it's worth a lot
+        food_refresh_rate=0.02,
+        eating_bonus=60.0,
     )
 
-    # "Steady" zone: common food, small payoff
     steady_biome = BiomeConfig(
         x=16, y=2, width=6, height=6,
-        food_refresh_rate=0.4,    # food spawns often
-        eating_bonus=8.0,         # but each piece is worth little
+        food_refresh_rate=0.4,
+        eating_bonus=8.0, 
     )
 
-    # "Desert" zone: food almost never spawns, tiny payoff -- a clear "bad" zone
     desert_biome = BiomeConfig(
         x=9, y=16, width=6, height=6,
         food_refresh_rate=0.01,
@@ -444,19 +435,21 @@ def run():
         lr=3e-4,
     )
 
-    print(f"=== Booting BugBrain Matrix ===")
+    print(f"=== Booting BugBrain Matrix (Stage 3: Run) ===")
     print(f"Device: {world_cfg_run.device.upper()}")
     print(f"Parallel Worlds: {world_cfg_run.envs}")
 
     train_ppo(
         world_cfg=world_cfg_run,
         ppo_cfg=ppo_cfg_run,
-        save_path="stage3_run.pt",   # resume from stage2 weights by copying the file first
+        save_path="stage3_run.pt",
         load_path="stage2_walk_hard.pt",
         total_timesteps=1_000_000,
         layout="hard"
     )
 
 if __name__ == '__main__':
+    # You can switch between progression stages here
     crawl()
     # walk()
+    # run()
