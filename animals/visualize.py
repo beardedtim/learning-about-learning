@@ -54,6 +54,12 @@ def render_trained_brain(cfg: WorldConfig, brain_cfg: ActorCriticBrainConfig, lo
 
     print(f"=== Watching Trained Brain ({load_path}) ===")
 
+
+
+    # MAX ACROSS RESETS
+    max_food_so_far = 0
+    total_deaths = 0
+
     with torch.no_grad():
         while running:
             for event in pygame.event.get():
@@ -82,6 +88,13 @@ def render_trained_brain(cfg: WorldConfig, brain_cfg: ActorCriticBrainConfig, lo
             
             next_obs, rewards, dones = env.step(actions.unsqueeze(1))
             
+            if dones[0]:
+                env.reset()
+                total_deaths += 1
+                continue
+            else:
+                max_food_so_far = max(env.food_eaten[0].item(), max_food_so_far)
+
             raw_obs = next_obs.squeeze(1)
             rewards = rewards.squeeze(1)
             dones = dones.squeeze(1)
@@ -99,17 +112,24 @@ def render_trained_brain(cfg: WorldConfig, brain_cfg: ActorCriticBrainConfig, lo
 
             action_taken = actions[0].item()
 
-            env.render(env_idx=0, fps=15, last_action=action_taken, layout=layout, brain_state=current_brain_state)
+            env.render(env_idx=0, fps=8, last_action=action_taken, layout=layout, brain_state=current_brain_state, ctx={
+                "max_food": max_food_so_far,
+                "total_deaths": total_deaths
+            })
     
             h, c = new_h, new_c
-
     pygame.quit()
 
 if __name__ == '__main__':
     # Crawl Config
-    (world_cfg, _, brain_cfg) = walk_ppo_training_config()
-    file = "stage2_walk_medium.pt"
-    layout = "medium"
+    (world_cfg, _, brain_cfg) = crawl_ppo_training_config()
+    file = "stage1_crawl.pt"
+    layout = "easy"
+
+    # Walk
+    # (world_cfg, _, brain_cfg) = walk_ppo_training_config()
+    # file = "stage2_walk_medium.pt"
+    # layout = "medium"
 
     print("Booting visualizer...")
     render_trained_brain(world_cfg, brain_cfg=brain_cfg, load_path=file, layout=layout)

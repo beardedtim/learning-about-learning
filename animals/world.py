@@ -694,7 +694,10 @@ class World:
 
         return self.get_observations(), rewards, dones
 
-    def render(self, env_idx=0, cell_size=24, fps=15, last_action=None, layout = "easy", brain_state=None):
+    def render(self, env_idx=0, cell_size=24, fps=15, last_action=None, layout = "easy", brain_state=None, ctx: dict = {
+        "max_food": 0,
+        "total_deaths": 0,
+    }):
         """
         Renders a visually stunning, bioluminescent environment with Bug Vision
         and Telemetry properly stacked in a unified side panel.
@@ -786,7 +789,7 @@ class World:
             b_width = biome.width * self.cell_size
             b_height = biome.height * self.cell_size
             biome_rect = pygame.Rect(bx, by, b_width, b_height)
-            pygame.draw.rect(self.screen, (50, 180, 50), biome_rect, 2, border_radius=4)
+            pygame.draw.rect(self.screen, (50, 180, 50), biome_rect, 2, border_radius=16)
 
         # ---------------------------------------------------------
         # 2. DRAW THE VISION CONE HIGHLIGHTS & BUG (Main Map)
@@ -930,11 +933,11 @@ class World:
         status_color = self.ui_success if is_alive else self.ui_danger
         life_color = self.ui_success if life > 30 else self.ui_danger
 
-        draw_ui_text(self.font_sm, "Status:", status_str, status_color, current_y)
+        draw_ui_text(self.font_sm, "Status:", f"current: {status_str} / deaths: {ctx["total_deaths"]}", status_color, current_y)
         current_y += 30
         draw_ui_text(self.font_sm, "Health:", f"{life:.1f}", life_color, current_y)
         current_y += 30
-        draw_ui_text(self.font_sm, "Food Eaten:", f"{eaten}", self.ui_text_primary, current_y)
+        draw_ui_text(self.font_sm, "Food Eaten:", f"current: {eaten} / max: {ctx["max_food"]}", self.ui_text_primary, current_y)
         current_y += 30
         
         last_action_color = self.ui_accent

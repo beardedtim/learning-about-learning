@@ -68,13 +68,13 @@ def crawl_ppo_training_config():
     )
 
     ppo_cfg_crawl = PPOConfig(
-        rollout_steps=512,
-        ent_coef=0.01,
-        ppo_epochs=4,
+        rollout_steps=128,
+        ent_coef=0.02,
+        ppo_epochs=8,
         lr=3e-4,
     )
 
-    brain_config = ActorCriticBrainConfig()
+    brain_config = ActorCriticBrainConfig(num_layers=5)
 
     return world_cfg_crawl, ppo_cfg_crawl, brain_config
 
@@ -117,7 +117,8 @@ def walk_ppo_training_config():
         lr=3e-4,
     )
 
-    brain_config = ActorCriticBrainConfig()
+    brain_config = ActorCriticBrainConfig(num_layers=5)
+
 
     return world_cfg_walk, ppo_cfg_walk, brain_config
 
@@ -159,7 +160,8 @@ def run_ppo_trianing_config():
         lr=3e-4,
     )
 
-    brain_config = ActorCriticBrainConfig()
+    brain_config = ActorCriticBrainConfig(num_layers=5)
+
     
     return world_cfg_run, ppo_cfg_run, brain_config
 
