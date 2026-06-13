@@ -16,3 +16,6 @@ bug_saves_bac/*
 
 maps/*
 !maps/.gitkeep
+
+checkpoints/*
+!checkpoints/.gitkeep
