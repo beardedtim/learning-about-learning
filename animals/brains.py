@@ -41,7 +41,7 @@ import torch.nn as nn
 from torch.distributions import Categorical          # for discrete actions
 # from torch.distributions import Normal             # swap in for continuous
 torch.set_float32_matmul_precision('high')
-
+from dataclasses import dataclass
 # ── tuneable hyper-params ────────────────────────────────────────────────────
 # NOTE: OBS_DIM is no longer a free constant -- it MUST match the environment.
 # Compute it from the env like:
@@ -56,7 +56,7 @@ EXTRA_FEATURES = ACTION_DIM + 2   # prev_action (one-hot) + prev_reward + life_f
 OBS_DIM     = 97    # placeholder only -- always recompute from env, see above
 EMBED_DIM   = 128   # encoder output / GRU input width
 HIDDEN_DIM  = 256   # GRU hidden state size
-NUM_LAYERS  = 1     # LSTM depth; start at 1, increase if animal seems forgetful
+NUM_LAYERS  = 2     # LSTM depth; start at 1, increase if animal seems forgetful
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -115,6 +115,13 @@ def build_obs_features(
 
     return torch.cat([cell_onehot, prev_action_onehot, reward_feat, life_norm], dim=-1)
 
+@dataclass
+class ActorCriticBrainConfig:
+    obs_dim:    int = OBS_DIM
+    action_dim: int = ACTION_DIM
+    embed_dim:  int = EMBED_DIM
+    hidden_dim: int = HIDDEN_DIM
+    num_layers: int = NUM_LAYERS
 
 class ActorCriticBrain(nn.Module):
     """
@@ -130,16 +137,12 @@ class ActorCriticBrain(nn.Module):
 
     def __init__(
         self,
-        obs_dim:    int = OBS_DIM,
-        action_dim: int = ACTION_DIM,
-        embed_dim:  int = EMBED_DIM,
-        hidden_dim: int = HIDDEN_DIM,
-        num_layers: int = NUM_LAYERS,
+        cfg
     ):
         super().__init__()
-
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
+        self.cfg = cfg
+        self.hidden_dim = cfg.hidden_dim
+        self.num_layers = cfg.num_layers
         rnd_out_dim = 128
 
         # ── 1. Sensory Encoder ───────────────────────────────────────────────
@@ -147,11 +150,11 @@ class ActorCriticBrain(nn.Module):
         # Two linear layers with LayerNorm gives stable gradients early in
         # training without requiring careful weight init.
         self.encoder = nn.Sequential(
-            nn.Linear(obs_dim, embed_dim),
-            nn.LayerNorm(embed_dim),
+            nn.Linear(cfg.obs_dim, cfg.embed_dim),
+            nn.LayerNorm(cfg.embed_dim),
             nn.ELU(),
-            nn.Linear(embed_dim, embed_dim),
-            nn.LayerNorm(embed_dim),
+            nn.Linear(cfg.embed_dim, cfg.embed_dim),
+            nn.LayerNorm(cfg.embed_dim),
             nn.ELU(),
         )
 
@@ -163,9 +166,9 @@ class ActorCriticBrain(nn.Module):
         # with far less vanishing, so the animal can retain information from
         # dozens or hundreds of steps ago (e.g. "that biome was sparse last time").
         self.memory = nn.LSTM(
-            input_size=embed_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
+            input_size=cfg.embed_dim,
+            hidden_size=cfg.hidden_dim,
+            num_layers=self.num_layers,
             batch_first=True,       # (batch, seq, feature) — easier to work with
         )
 
@@ -176,9 +179,9 @@ class ActorCriticBrain(nn.Module):
         #   - log_prob() for the policy gradient loss
         #   - entropy() as a regulariser that prevents premature certainty
         self.actor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim // 2),
             nn.ELU(),
-            nn.Linear(hidden_dim // 2, action_dim),
+            nn.Linear(cfg.hidden_dim // 2, cfg.action_dim),
             # NO softmax here — Categorical takes raw logits
         )
 
@@ -187,28 +190,28 @@ class ActorCriticBrain(nn.Module):
         # "How much future reward do I expect from this internal state?"
         # The TD error (actual - predicted) is the training signal for everything.
         self.critic = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim // 2),
             nn.ELU(),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(cfg.hidden_dim // 2, 1),
             # No activation — value is unbounded
         )
 
         # The Target: Fixed random projection. Never trains.
         self.rnd_target = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+            nn.Linear(cfg.obs_dim, cfg.hidden_dim),
             nn.ELU(),
-            nn.Linear(hidden_dim, rnd_out_dim)
+            nn.Linear(cfg.hidden_dim, rnd_out_dim)
         )
         for param in self.rnd_target.parameters():
             param.requires_grad = False
             
         # The Predictor: Tries to guess the Target's output.
         self.rnd_predictor = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+            nn.Linear(cfg.obs_dim, cfg.hidden_dim),
             nn.ELU(),
-            nn.Linear(hidden_dim, hidden_dim), # Slightly deeper to ensure capacity
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim), # Slightly deeper to ensure capacity
             nn.ELU(),
-            nn.Linear(hidden_dim, rnd_out_dim)
+            nn.Linear(cfg.hidden_dim, rnd_out_dim)
         )
 
         # ── 5. Dual Critic Heads ─────────────────────────────────────────────
@@ -217,16 +220,16 @@ class ActorCriticBrain(nn.Module):
         
         # Predicts return of the standard environment reward
         self.critic_ext = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim // 2),
             nn.ELU(),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(cfg.hidden_dim // 2, 1),
         )
         
         # Predicts return of the RND novelty reward
         self.critic_int = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim // 2),
             nn.ELU(),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(cfg.hidden_dim // 2, 1),
         )
 
     # ── Forward pass ─────────────────────────────────────────────────────────

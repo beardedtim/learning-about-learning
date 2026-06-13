@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 import torch
 import math
 
@@ -937,7 +936,17 @@ class World:
         current_y += 30
         draw_ui_text(self.font_sm, "Food Eaten:", f"{eaten}", self.ui_text_primary, current_y)
         current_y += 30
-        draw_ui_text(self.font_sm, "Last Action:", action_str, self.ui_accent, current_y)
+        
+        last_action_color = self.ui_accent
+
+        if action_str == "FORWARD":
+            last_action_color = (90, 234, 76)
+        elif action_str == "LEFT":
+            last_action_color = (45, 90, 226)
+        elif action_str == "RIGHT":
+            last_action_color = (88, 123, 156)
+
+        draw_ui_text(self.font_sm, "Last Action:", action_str, last_action_color, current_y)
         current_y += 40
 
         # ==================== C. BRAIN ACTIVITY (BOTTOM) ====================
@@ -1011,25 +1020,21 @@ class World:
         else:
             self.screen.blit(self.font_sm.render("NO SIGNAL", True, (100, 100, 100)), (panel_rect.left + 25, current_y))
 
-        # Reset everything once the bug under view dies
-        if not is_alive:
-            env.reset(layout=layout)
-
         pygame.display.flip()
         self.clock.tick(fps)
 
 def get_default_sensors():
     vision=SensorCone(
         fov_deg=120,
-        front_radius=3,
-        side_radius=5,
+        front_radius=5,
+        side_radius=3,
     )
 
-    prey_sensors = SensorRequest(
+    sensors = SensorRequest(
         vision=vision
     )
 
-    return prey_sensors
+    return sensors
 
 if __name__ == '__main__':
     import pygame

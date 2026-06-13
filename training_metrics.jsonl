@@ -1,3 +1,0 @@
-{"timestamp": "2026-06-12T21:42:06.462018Z", "level": "INFO", "message": "No existing brain found at 'stage1_crawl.pt'. Initializing a fresh brain."}
-{"timestamp": "2026-06-12T21:42:06.462460Z", "level": "INFO", "message": "Starting Training: 2441 updates of 8192 steps each."}
-{"timestamp": "2026-06-12T21:42:43.856435Z", "level": "INFO", "message": "Update   10/2441 | Food/Ep:  0.8 | EpLen: 122.7 | IntRwd:   0.30 | V-Ext:  32.79 | V-Int:   0.00 | RND:  0.001 | PG: 0.001", "metrics": {"update": 10, "step": 81920, "ep_reward": 26.43, "ep_length": 122.65, "avg_int_reward": 0.2953, "value_loss_ext": 32.7867, "value_loss_int": 0.0007, "rnd_loss": 0.0011, "policy_loss": 0.0014, "entropy": 0.9598, "current_avg_life_force": 52.19, "max_life_force": 100.0}}

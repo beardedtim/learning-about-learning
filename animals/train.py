@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from collections import deque
 
 from world import BiomeConfig, World, WorldConfig, get_default_sensors
-from brains import ActorCriticBrain, build_obs_features, NUM_CELL_TYPES, ACTION_DIM
+from brains import ActorCriticBrain, ActorCriticBrainConfig, build_obs_features, NUM_CELL_TYPES, ACTION_DIM
 from log import setup_logger
 
 # ==========================================
@@ -45,16 +45,16 @@ class PPOConfig:
 def crawl_ppo_training_config():
     crawl_biome_left = BiomeConfig(
         x=2, y=2, width=6, height=20,
-        food_refresh_rate=0.05, 
+        food_refresh_rate=0.1, 
         eating_bonus=35.0, 
-        max_food=3
+        max_food=6
     )
 
     crawl_biome_right = BiomeConfig(
         x=16, y=2, width=6, height=20,
-        food_refresh_rate=0.05, 
+        food_refresh_rate=0.1, 
         eating_bonus=35.0, 
-        max_food=3
+        max_food=6
     )
 
     world_cfg_crawl = WorldConfig(
@@ -63,25 +63,27 @@ def crawl_ppo_training_config():
         biomes=[crawl_biome_right, crawl_biome_left],
         bug_sensors=get_default_sensors(),
         num_bugs=1,
-        min_food=3,
+        min_food=6,
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
 
     ppo_cfg_crawl = PPOConfig(
-        rollout_steps=256,
-        ent_coef=0.02,
-        ppo_epochs=16,
+        rollout_steps=512,
+        ent_coef=0.01,
+        ppo_epochs=4,
         lr=3e-4,
     )
 
-    return world_cfg_crawl, ppo_cfg_crawl
+    brain_config = ActorCriticBrainConfig()
+
+    return world_cfg_crawl, ppo_cfg_crawl, brain_config
 
 def walk_ppo_training_config():
     biome_1 = BiomeConfig(
         x=2, y=2, width=8, height=8,
         food_refresh_rate=0.05,
-        eating_bonus=30.0,
-        max_food=3
+        eating_bonus=10.0,
+        max_food=10
     )
 
     biome_2 = BiomeConfig(
@@ -111,11 +113,13 @@ def walk_ppo_training_config():
     ppo_cfg_walk = PPOConfig(
         rollout_steps=256,
         ent_coef=0.02,
-        ppo_epochs=4,
+        ppo_epochs=8,
         lr=3e-4,
     )
 
-    return world_cfg_walk, ppo_cfg_walk
+    brain_config = ActorCriticBrainConfig()
+
+    return world_cfg_walk, ppo_cfg_walk, brain_config
 
 def run_ppo_trianing_config():
     jackpot_biome = BiomeConfig(
@@ -155,9 +159,11 @@ def run_ppo_trianing_config():
         lr=3e-4,
     )
 
-    return world_cfg_run, ppo_cfg_run
+    brain_config = ActorCriticBrainConfig()
+    
+    return world_cfg_run, ppo_cfg_run, brain_config
 
-def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_path="smart_bug.pt", load_path="smart_bug.pt", total_timesteps=1_000_000, layout="easy"):
+def train_ppo(world_cfg: WorldConfig, brain_cfg: ActorCriticBrainConfig, ppo_cfg: PPOConfig = PPOConfig(), save_path="smart_bug.pt", load_path="smart_bug.pt", total_timesteps=1_000_000, layout="easy"):
     """
     Main training loop for the Proximal Policy Optimization (PPO) agent.
     Handles environment interaction, advantage estimation, and network optimization.
@@ -189,7 +195,9 @@ def train_ppo(world_cfg: WorldConfig, ppo_cfg: PPOConfig = PPOConfig(), save_pat
     obs_dim = NUM_CELL_TYPES * V + ACTION_DIM + 2
 
     # Initialize the neural network
-    brain = ActorCriticBrain(obs_dim=obs_dim, action_dim=3).to(world_cfg.device)
+    brain_cfg.obs_dim = obs_dim
+
+    brain = ActorCriticBrain(brain_cfg).to(world_cfg.device)
 
     # Load existing network weights if available to resume training
     if os.path.exists(load_path):
@@ -440,7 +448,7 @@ def crawl():
     """
     Stage 1: A simple biome dense with food to allow the agent to establish base navigation and eating mechanics.
     """
-    (world_cfg, ppo_cfg) = crawl_ppo_training_config()
+    (world_cfg, ppo_cfg, brain_cfg) = crawl_ppo_training_config()
 
     print(f"=== Booting BugBrain Matrix (Stage 1: Crawl) ===")
     print(f"Device: {world_cfg.device.upper()}")
@@ -448,6 +456,7 @@ def crawl():
 
     train_ppo(
         world_cfg=world_cfg,
+        brain_cfg=brain_cfg,
         ppo_cfg=ppo_cfg,
         save_path="stage1_crawl.pt",
         load_path="stage1_crawl.pt",
@@ -460,7 +469,7 @@ def walk():
     """
     Stage 2: Introduces standard mazes and obstacles on top of the established eating behaviors.
     """
-    (world_cfg, ppo_cfg) = walk_ppo_training_config()
+    (world_cfg, ppo_cfg, brain_cfg) = walk_ppo_training_config()
 
     print(f"=== Booting BugBrain Matrix (Stage 2: Walk) ===")
     print(f"Device: {world_cfg.device.upper()}")
@@ -468,10 +477,11 @@ def walk():
 
     train_ppo(
         world_cfg=world_cfg,
+        brain_cfg=brain_cfg,
         ppo_cfg=ppo_cfg,
         save_path="stage2_walk_medium.pt",
-        load_path="stage1_crawl.pt", # If you want to load the previous crawl
-        # load_path="stage2_walk_medium.pt", # If you want to load previous walk_medium runs
+        # load_path="stage1_crawl.pt", # If you want to load the previous crawl
+        load_path="stage2_walk_medium.pt", # If you want to load previous walk_medium runs
         total_timesteps=20_000_000,
         layout="medium"
     )
@@ -480,7 +490,7 @@ def run():
     """
     Stage 3: Complex layout utilizing distinct biome zones (Jackpot, Steady, Desert) with varied rulesets.
     """
-    (world_cfg, ppo_cfg) = run_ppo_trianing_config()
+    (world_cfg, ppo_cfg, brain_cfg) = run_ppo_trianing_config()
 
     print(f"=== Booting BugBrain Matrix (Stage 3: Run) ===")
     print(f"Device: {world_cfg.device.upper()}")
@@ -488,6 +498,7 @@ def run():
 
     train_ppo(
         world_cfg=ppo_cfg,
+        brain_cfg=brain_cfg,
         ppo_cfg=ppo_cfg,
         save_path="stage3_run.pt",
         # load_path="stage3_run.pt",

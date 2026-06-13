@@ -2,9 +2,9 @@ import pygame
 import torch
 from torch.distributions import Categorical
 
-from train import crawl_ppo_training_config
+from train import crawl_ppo_training_config, walk_ppo_training_config
 from world import World, WorldConfig
-from brains import ACTION_DIM, NUM_CELL_TYPES, ActorCriticBrain, build_obs_features
+from brains import ACTION_DIM, NUM_CELL_TYPES, ActorCriticBrain, ActorCriticBrainConfig, build_obs_features
 
 # ==========================================
 # ACCESSIBLE COLOR PALETTE (WCAG Compliant)
@@ -24,7 +24,8 @@ VISION_COLORS = {
 }
 
 
-def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt", layout = "easy"):
+def render_trained_brain(cfg: WorldConfig, brain_cfg: ActorCriticBrainConfig, load_path="stage2_walk_medium.pt", layout = "easy"):
+    cfg.num_bugs = 1
     env = World(cfg)
     
     raw_obs = env.reset(layout=layout).squeeze(1)
@@ -36,7 +37,9 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt", la
     
     obs = build_obs_features(raw_obs, prev_action, prev_reward, env.life_force.squeeze(1), max_life_force=cfg.max_life_force)
 
-    brain = ActorCriticBrain(obs_dim=obs_dim, action_dim=3).to(cfg.device)
+    brain_cfg.obs_dim=obs_dim
+
+    brain = ActorCriticBrain(brain_cfg).to(cfg.device)
     brain.load_state_dict(torch.load(load_path, map_location=cfg.device))
     brain.eval() 
 
@@ -97,15 +100,16 @@ def render_trained_brain(cfg: WorldConfig, load_path="stage2_walk_medium.pt", la
             action_taken = actions[0].item()
 
             env.render(env_idx=0, fps=15, last_action=action_taken, layout=layout, brain_state=current_brain_state)
-
-
+    
             h, c = new_h, new_c
 
     pygame.quit()
 
 if __name__ == '__main__':
     # Crawl Config
-    (world_cfg, _) = crawl_ppo_training_config()
+    (world_cfg, _, brain_cfg) = walk_ppo_training_config()
+    file = "stage2_walk_medium.pt"
+    layout = "medium"
 
     print("Booting visualizer...")
-    render_trained_brain(world_cfg, load_path="stage1_crawl.pt", layout="easy")
+    render_trained_brain(world_cfg, brain_cfg=brain_cfg, load_path=file, layout=layout)
