@@ -264,6 +264,14 @@ class World:
         self.map[:, :, 0] = self.WALL
         self.map[:, :, -1] = self.WALL
 
+        # Center-aligned vertical wall (half-length)
+        mid_col = self.cfg.grid_size // 2
+        start_row = self.cfg.grid_size // 4
+        end_row = 3 * self.cfg.grid_size // 4
+        
+        # Slices the middle column from 25% down to 75% down
+        self.map[:, start_row:end_row, mid_col] = self.WALL
+
     def _generate_grid_dungeon(self, grid_dim: int, min_ratio: float, max_ratio: float):
         """
         Generates a mathematically connected dungeon using a Grid Mesh Topology.
@@ -688,7 +696,7 @@ class World:
             needs_respawn &= ~valid_spot
 
         # Now that everyone is guaranteed to be on the board, reset life force
-        self.life_force[dones] = 100.0
+        self.life_force[dones] = self.cfg.max_life_force
 
         self._spawn_food()
 

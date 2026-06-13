@@ -89,7 +89,7 @@ def render_trained_brain(cfg: WorldConfig, brain_cfg: ActorCriticBrainConfig, lo
             next_obs, rewards, dones = env.step(actions.unsqueeze(1))
             
             if dones[0]:
-                env.reset()
+                env.reset(layout=layout)
                 total_deaths += 1
                 continue
             else:

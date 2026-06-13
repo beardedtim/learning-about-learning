@@ -185,17 +185,6 @@ class ActorCriticBrain(nn.Module):
             # NO softmax here — Categorical takes raw logits
         )
 
-        # ── 4. Critic Head ───────────────────────────────────────────────────
-        # Maps hidden state → scalar value estimate V(s).
-        # "How much future reward do I expect from this internal state?"
-        # The TD error (actual - predicted) is the training signal for everything.
-        self.critic = nn.Sequential(
-            nn.Linear(cfg.hidden_dim, cfg.hidden_dim // 2),
-            nn.ELU(),
-            nn.Linear(cfg.hidden_dim // 2, 1),
-            # No activation — value is unbounded
-        )
-
         # The Target: Fixed random projection. Never trains.
         self.rnd_target = nn.Sequential(
             nn.Linear(cfg.obs_dim, cfg.hidden_dim),
@@ -294,7 +283,6 @@ class ActorCriticBrain(nn.Module):
         return zeros(), zeros()   # (h, c)
 
     # ── Helper: evaluate stored actions ───────────────────────────────────────
-    @torch.compile
     def evaluate_actions(
         self,
         obs:     torch.Tensor,   

@@ -20,6 +20,7 @@ DEFAULT_GAE_LAMBDA = 0.95
 DEFAULT_CLIP_COEF = 0.2
 DEFAULT_ENT_COEF = 0.01
 DEFAULT_VF_COEF = 0.5
+DEFAULT_INT_COEF = 0.01
 DEFAULT_LR = 3e-4
 
 @dataclass
@@ -36,25 +37,29 @@ class PPOConfig:
     ent_coef: float = DEFAULT_ENT_COEF
     vf_coef: float = DEFAULT_VF_COEF
     lr: float = DEFAULT_LR
+    int_coef: float = DEFAULT_INT_COEF
 
 #
 # Moved training configs to own functions so we could use them
 # inside of visualize
 #
 
+def get_brain_config():
+    return ActorCriticBrainConfig(num_layers=1, hidden_dim=256)
+
 def crawl_ppo_training_config():
     crawl_biome_left = BiomeConfig(
         x=2, y=2, width=6, height=20,
-        food_refresh_rate=0.1, 
-        eating_bonus=35.0, 
-        max_food=6
+        food_refresh_rate=0.05, 
+        eating_bonus=40.0, 
+        max_food=10
     )
 
     crawl_biome_right = BiomeConfig(
         x=16, y=2, width=6, height=20,
         food_refresh_rate=0.1, 
-        eating_bonus=35.0, 
-        max_food=6
+        eating_bonus=15.0, 
+        max_food=2
     )
 
     world_cfg_crawl = WorldConfig(
@@ -63,41 +68,42 @@ def crawl_ppo_training_config():
         biomes=[crawl_biome_right, crawl_biome_left],
         bug_sensors=get_default_sensors(),
         num_bugs=1,
-        min_food=6,
+        min_food=2,
+        max_life_force=200.0,
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
 
     ppo_cfg_crawl = PPOConfig(
-        rollout_steps=128,
-        ent_coef=0.02,
-        ppo_epochs=8,
-        lr=3e-4,
+        rollout_steps=512,
+        ent_coef=0.005,
+        ppo_epochs=4,
+        lr=2e-4,
     )
 
-    brain_config = ActorCriticBrainConfig(num_layers=5)
+    brain_config = get_brain_config()
 
     return world_cfg_crawl, ppo_cfg_crawl, brain_config
 
 def walk_ppo_training_config():
     biome_1 = BiomeConfig(
         x=2, y=2, width=8, height=8,
-        food_refresh_rate=0.05,
-        eating_bonus=10.0,
+        food_refresh_rate=0.01,
+        eating_bonus=100.0,
         max_food=10
     )
 
     biome_2 = BiomeConfig(
         x=22, y=2, width=8, height=8,
-        food_refresh_rate=0.05,
-        eating_bonus=30.0,
+        food_refresh_rate=0.1,
+        eating_bonus=25.0,
         max_food=3
     )
 
     biome_3 = BiomeConfig(
         x=12, y=22, width=8, height=8,
-        food_refresh_rate=0.05,
-        eating_bonus=30.0,
-        max_food=3
+        food_refresh_rate=0.001,
+        eating_bonus=20.0,
+        max_food=2
     )
 
     world_cfg_walk = WorldConfig(
@@ -106,18 +112,19 @@ def walk_ppo_training_config():
         biomes=[biome_1, biome_2, biome_3],
         bug_sensors=get_default_sensors(),
         num_bugs=1,
-        min_food=1,
+        min_food=4,
+        max_life_force=200.0,
         device='cuda' if torch.cuda.is_available() else 'cpu',
     )
 
     ppo_cfg_walk = PPOConfig(
-        rollout_steps=256,
-        ent_coef=0.02,
+        rollout_steps=512,
+        ent_coef=0.03,
         ppo_epochs=8,
         lr=3e-4,
     )
 
-    brain_config = ActorCriticBrainConfig(num_layers=5)
+    brain_config = get_brain_config()
 
 
     return world_cfg_walk, ppo_cfg_walk, brain_config
@@ -155,13 +162,13 @@ def run_ppo_trianing_config():
     )
 
     ppo_cfg_run = PPOConfig(
-        rollout_steps=128,
+        rollout_steps=256,
         ppo_epochs=4,
+        ent_coef=0.03,
         lr=3e-4,
     )
 
-    brain_config = ActorCriticBrainConfig(num_layers=5)
-
+    brain_config = get_brain_config()
     
     return world_cfg_run, ppo_cfg_run, brain_config
 
@@ -344,7 +351,12 @@ def train_ppo(world_cfg: WorldConfig, brain_cfg: ActorCriticBrainConfig, ppo_cfg
                 advantages_int[t] = lastgaelam_int = delta_int + 0.99 * gae_lambda * nextnonterminal * lastgaelam_int
 
             # Combine advantages and calculate final returns
-            advantages = advantages_ext + (0.01 * advantages_int)
+            advantages = advantages_ext + (ppo_cfg.int_coef * advantages_int)
+
+            # Normalize the combined advantages across the batch/rollout!
+            # The 1e-8 prevents division by zero if the std is exactly 0.
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
             returns_ext = advantages_ext + b_values
             returns_int = advantages_int + b_values_int
 
@@ -484,7 +496,7 @@ def walk():
         save_path="stage2_walk_medium.pt",
         # load_path="stage1_crawl.pt", # If you want to load the previous crawl
         load_path="stage2_walk_medium.pt", # If you want to load previous walk_medium runs
-        total_timesteps=20_000_000,
+        total_timesteps=10_000_000,
         layout="medium"
     )
 
